@@ -2,7 +2,8 @@
 // Owns one Puppeteer-managed Chromium profile, keeps CDP available for the daemon,
 // and controls browser visibility without touching user-owned tabs.
 
-import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
@@ -46,32 +47,40 @@ async function ensureChromiumInstalled() {
   try {
     exePath = computeExecutablePath({ browser: Browser.CHROME, buildId, cacheDir });
     if (existsSync(exePath)) return exePath;
-  } catch { /* not found, install */ }
+  } catch { /* not found */ }
 
-  // The install root is two levels up from the exe:
-  //   ...chrome/win64-148.0.7778.97/chrome-win64/chrome.exe
-  //                          ^-- install root --^
-  // If the install root exists but the exe is missing, a previous download
-  // was interrupted.  Clean it so install() doesn't bail out.
-  if (exePath) {
-    const installRoot = dirname(dirname(exePath));
-    if (existsSync(installRoot)) {
-      console.log('[chrome] Stale partial download found — cleaning up...');
-      rmSync(installRoot, { recursive: true, force: true });
-    }
-  }
+  // Try install.  If a previous download left a stale directory (folder
+  // exists but chrome.exe is missing), @puppeteer/browsers will refuse to
+  // overwrite it.  Clean it up and retry once.
+  const doInstall = () => install({
+    browser: Browser.CHROME,
+    buildId,
+    cacheDir,
+    platform: detectBrowserPlatform(),
+    unpack: true,
+  });
 
-  console.log('[chrome] Chromium not found in cache — downloading (this may take a minute)...');
   try {
-    await install({
-      browser: Browser.CHROME,
-      buildId,
-      cacheDir,
-      platform: detectBrowserPlatform(),
-      unpack: true,
-    });
+    console.log('[chrome] Chromium not found — downloading (this may take a minute)...');
+    await doInstall();
   } catch (err) {
-    throw new Error(`Failed to download Chromium: ${err.message}. Check your internet connection.`);
+    const msg = err?.message || '';
+    if (msg.includes('exists but the executable') && exePath) {
+      const installRoot = dirname(dirname(exePath));
+      console.log('[chrome] Stale partial download found, cleaning up...');
+      try {
+        await rm(installRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });
+      } catch (cleanErr) {
+        throw new Error(
+          `Cannot clean corrupted Chromium download at:\n${installRoot}\n\n` +
+          `Please delete this folder manually and restart Homelander.\n(${cleanErr.message})`
+        );
+      }
+      console.log('[chrome] Retrying download...');
+      await doInstall();
+    } else {
+      throw new Error(`Failed to download Chromium: ${msg}. Check your internet connection.`);
+    }
   }
 
   exePath = computeExecutablePath({ browser: Browser.CHROME, buildId, cacheDir });
