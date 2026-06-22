@@ -3,16 +3,6 @@ name: Release
 on:
   workflow_dispatch:
     inputs:
-      platforms:
-        description: 'Platforms to build'
-        required: true
-        type: choice
-        default: 'mac'
-        options:
-          - mac
-          - win
-          - linux
-          - all
       version:
         description: 'Version tag (e.g. v1.0.5)'
         required: true
@@ -27,58 +17,41 @@ jobs:
         include:
           - os: macos-latest
             platform: mac
-          - os: ubuntu-latest
-            platform: linux
-          - os: windows-latest
-            platform: win
     runs-on: ${{ matrix.os }}
 
     steps:
-      - name: Skip non-selected platforms
-        if: ${{ github.event.inputs.platforms != 'all' && github.event.inputs.platforms != matrix.platform }}
-        run: exit 0
-
       - uses: actions/checkout@v7
-        if: ${{ github.event.inputs.platforms == 'all' || github.event.inputs.platforms == matrix.platform }}
 
       - uses: actions/setup-node@v6
-        if: ${{ github.event.inputs.platforms == 'all' || github.event.inputs.platforms == matrix.platform }}
         with:
           node-version: '22'
 
       - name: Install
-        if: ${{ github.event.inputs.platforms == 'all' || github.event.inputs.platforms == matrix.platform }}
         run: npm ci --ignore-scripts
         env:
           PUPPETEER_SKIP_DOWNLOAD: 'true'
 
       - name: Install setuptools (for node-gyp on Python 3.12+)
-        if: ${{ github.event.inputs.platforms == 'all' || github.event.inputs.platforms == matrix.platform }}
         run: pip3 install --break-system-packages setuptools
 
       - name: Rebuild native modules for Electron
-        if: ${{ github.event.inputs.platforms == 'all' || github.event.inputs.platforms == matrix.platform }}
         run: npm run rebuild:electron
 
       - name: Test
-        if: ${{ github.event.inputs.platforms == 'all' || github.event.inputs.platforms == matrix.platform }}
         run: npm test
         env:
           PUPPETEER_SKIP_DOWNLOAD: 'true'
 
       - name: Verify native module arch
-        if: ${{ github.event.inputs.platforms == 'all' || github.event.inputs.platforms == matrix.platform }}
         run: file node_modules/better-sqlite3/build/Release/better_sqlite3.node
 
       - name: Build
-        if: ${{ github.event.inputs.platforms == 'all' || github.event.inputs.platforms == matrix.platform }}
         run: npm run dist:${{ matrix.platform }}
         env:
           PUPPETEER_SKIP_DOWNLOAD: 'true'
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload to release
-        if: ${{ github.event.inputs.platforms == 'all' || github.event.inputs.platforms == matrix.platform }}
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event.inputs.version }}
@@ -87,10 +60,6 @@ jobs:
             release/*.dmg.blockmap
             release/*.zip
             release/*.zip.blockmap
-            release/*.exe
-            release/*.exe.blockmap
-            release/*.AppImage
-            release/*.deb
             release/latest*.yml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
