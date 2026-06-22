@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { spawn } from 'node:child_process';
 import puppeteer from 'puppeteer';
+import { install, computeExecutablePath, detectBrowserPlatform, Browser } from '@puppeteer/browsers';
 
 const CDP_PORT = 9222;
 const DEFAULT_MAX_TABS = 5;
@@ -19,12 +20,49 @@ function swallow(err, context) {
 }
 
 
+/** Puppeteer v24 ships Chrome for Testing 148.0.7778.97 */
+const CHROME_BUILD_ID = '148.0.7778.97';
+
 function getBundledChromiumPath() {
   try {
     const executablePath = puppeteer.executablePath();
     if (executablePath && existsSync(executablePath)) return executablePath;
   } catch (err) { swallow(err, 'get-bundled-chromium'); }
   return null;
+}
+
+/**
+ * Install Chromium for Testing into the Puppeteer cache when it's not
+ * already present.  The full `puppeteer` package normally downloads the
+ * browser on first `launch()`, but that auto-download fails inside an
+ * Electron ASAR bundle — so we call the install API explicitly.
+ */
+async function ensureChromiumInstalled() {
+  const buildId = CHROME_BUILD_ID;
+  const cacheDir = join(homedir(), '.cache', 'puppeteer');
+
+  // Fast path: already installed?
+  try {
+    const exePath = computeExecutablePath({ browser: Browser.CHROME, buildId, cacheDir });
+    if (existsSync(exePath)) return exePath;
+  } catch { /* not found, install */ }
+
+  console.log('[chrome] Chromium not found in cache — downloading (this may take a minute)...');
+  try {
+    await install({
+      browser: Browser.CHROME,
+      buildId,
+      cacheDir,
+      platform: detectBrowserPlatform(),
+      unpack: true,
+    });
+  } catch (err) {
+    throw new Error(`Failed to download Chromium: ${err.message}. Check your internet connection.`);
+  }
+
+  const exePath = computeExecutablePath({ browser: Browser.CHROME, buildId, cacheDir });
+  console.log(`[chrome] Chromium installed at ${exePath}`);
+  return exePath;
 }
 
 function getProfileDir(email) {
@@ -75,8 +113,10 @@ export class ChromeManager {
     }
 
     const executablePath = getBundledChromiumPath();
-    if (!executablePath) {
-      console.log('[chrome] Bundled Chromium not found, letting Puppeteer install it...');
+    let resolvedPath = executablePath;
+    if (!resolvedPath) {
+      console.log('[chrome] Bundled Chromium not found, installing...');
+      resolvedPath = await ensureChromiumInstalled();
     }
     mkdirSync(this.profileDir, { recursive: true });
 
@@ -88,7 +128,7 @@ export class ChromeManager {
     this._restartWindow.push(now);
 
     this.browser = await puppeteer.launch({
-      ...(executablePath ? { executablePath } : {}),
+      executablePath: resolvedPath,
       headless: false,
       defaultViewport: null,
       userDataDir: this.profileDir,
