@@ -76,7 +76,7 @@ export class ChromeManager {
 
     const executablePath = getBundledChromiumPath();
     if (!executablePath) {
-      throw new Error('Bundled Chromium not found. Run npm install so Puppeteer can install its browser.');
+      console.log('[chrome] Bundled Chromium not found, letting Puppeteer install it...');
     }
     mkdirSync(this.profileDir, { recursive: true });
 
@@ -88,7 +88,7 @@ export class ChromeManager {
     this._restartWindow.push(now);
 
     this.browser = await puppeteer.launch({
-      executablePath,
+      ...(executablePath ? { executablePath } : {}),
       headless: false,
       defaultViewport: null,
       userDataDir: this.profileDir,
@@ -303,7 +303,9 @@ export class ChromeManager {
 
     const executablePath = getBundledChromiumPath();
     if (!executablePath) {
-      throw new Error('Bundled Chromium not found. Run npm install so Puppeteer can install its browser.');
+      console.log('[chrome] Chromium not found for manual login, falling back to Puppeteer launch...');
+      const info = await this.launch(email, { ...options, visibility: 'always_show' });
+      return { cdpConnected: true, manualLogin: false, ...info };
     }
 
     // Start Chromium WITH CDP so the daemon can connect to the SAME browser
