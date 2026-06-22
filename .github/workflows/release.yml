@@ -10,6 +10,8 @@ on:
         default: 'mac'
         options:
           - mac
+          - win
+          - linux
           - all
       version:
         description: 'Version tag (e.g. v1.0.5)'

@@ -17,6 +17,11 @@ import { openSharedDb, closeSharedDb, db } from './db-service.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const isDev = !app.isPackaged;
 
+// ── State ──────────────────────────────────────────────────────
+
+let mainWindow = null;
+let daemonProcess = null;
+
 // Single-instance lock — prevents duplicate Electron processes
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
@@ -49,10 +54,8 @@ const APP_ICON_PNG = process.resourcesPath
   ? join(process.resourcesPath, 'icon.png')
   : join(__dirname, '..', 'resources', 'icon.png');
 
-// ── State ──────────────────────────────────────────────────────
+// ── State (continued) ──────────────────────────────────────────
 
-let mainWindow = null;
-let daemonProcess = null;
 let daemonStatus = 'stopped'; // stopped | running | paused | restarting | session_expired
 let daemonStartedAt = 0;      // timestamp of last startDaemon() call
 let latestNextPollAt = null;  // last future next_poll_at emitted by daemon poll loop
