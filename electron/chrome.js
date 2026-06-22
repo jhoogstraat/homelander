@@ -2,8 +2,8 @@
 // Owns one Puppeteer-managed Chromium profile, keeps CDP available for the daemon,
 // and controls browser visibility without touching user-owned tabs.
 
-import { existsSync, mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { join, dirname } from 'node:path';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { spawn } from 'node:child_process';
@@ -42,10 +42,24 @@ async function ensureChromiumInstalled() {
   const cacheDir = join(homedir(), '.cache', 'puppeteer');
 
   // Fast path: already installed?
+  let exePath;
   try {
-    const exePath = computeExecutablePath({ browser: Browser.CHROME, buildId, cacheDir });
+    exePath = computeExecutablePath({ browser: Browser.CHROME, buildId, cacheDir });
     if (existsSync(exePath)) return exePath;
   } catch { /* not found, install */ }
+
+  // The install root is two levels up from the exe:
+  //   ...chrome/win64-148.0.7778.97/chrome-win64/chrome.exe
+  //                          ^-- install root --^
+  // If the install root exists but the exe is missing, a previous download
+  // was interrupted.  Clean it so install() doesn't bail out.
+  if (exePath) {
+    const installRoot = dirname(dirname(exePath));
+    if (existsSync(installRoot)) {
+      console.log('[chrome] Stale partial download found — cleaning up...');
+      rmSync(installRoot, { recursive: true, force: true });
+    }
+  }
 
   console.log('[chrome] Chromium not found in cache — downloading (this may take a minute)...');
   try {
@@ -60,7 +74,7 @@ async function ensureChromiumInstalled() {
     throw new Error(`Failed to download Chromium: ${err.message}. Check your internet connection.`);
   }
 
-  const exePath = computeExecutablePath({ browser: Browser.CHROME, buildId, cacheDir });
+  exePath = computeExecutablePath({ browser: Browser.CHROME, buildId, cacheDir });
   console.log(`[chrome] Chromium installed at ${exePath}`);
   return exePath;
 }
