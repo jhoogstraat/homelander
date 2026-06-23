@@ -1335,12 +1335,13 @@ function deepMerge(target, patch) {
 
 // ── App Lifecycle ──────────────────────────────────────────────
 
+// Enable CDP on Electron's own Chromium so the daemon and Puppeteer
+// can drive IS24 automation without a separate Chrome download.
+// MUST be before app.whenReady() — Chromium process args are frozen on ready.
+app.commandLine.appendSwitch('remote-debugging-port', '9222');
+
 app.whenReady().then(async () => {
   app.setName('Homelander');
-
-  // Enable CDP on Electron's own Chromium so the daemon and Puppeteer
-  // can drive IS24 automation without a separate Chrome download.
-  app.commandLine.appendSwitch('remote-debugging-port', '9222');
 
   loadConfig();
   registerIpcHandlers();
