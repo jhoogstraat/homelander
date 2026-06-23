@@ -61,15 +61,7 @@ let latestNextPollAt = null;  // last future next_poll_at emitted by daemon poll
 let daemonStopping = false;   // true only during an explicit user stop/SIGTERM window
 let _stopKillTimer = null;    // SIGKILL timeout handle — cleared on start to prevent cross-fire
 let chromeManager = new ChromeManager();
-let _chromiumDownload = { status: 'idle', downloaded: 0, total: 0, error: null }; // 'idle' | 'downloading' | 'ready' | 'error'
 
-// Forward Chromium download progress to renderer
-chromeManager._onDownloadProgress = (downloaded, total) => {
-  _chromiumDownload = { status: 'downloading', downloaded, total, error: null };
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('homelander:chromium-download', _chromiumDownload);
-  }
-};
 chromeManager._chromeLogPath = CHROME_LOG;
 let config = null;
 let setupComplete = false;
@@ -1184,35 +1176,29 @@ function registerIpcHandlers() {
     const healthy = await chromeManager.isHealthy();
     const manualLogin = chromeManager.isManualLoginRunning?.() || false;
     const tabCount = healthy ? await chromeManager.getTabCount() : -1;
-    return { running: healthy || manualLogin, manualLogin, cdpHealthy: healthy, tabCount, maxTabs: browserOptions().maxTabs, visibility: browserOptions().visibility, download: _chromiumDownload, manualLoginCrash: chromeManager._lastManualLoginCrash || null };
+    return { running: healthy || manualLogin, manualLogin, cdpHealthy: healthy, tabCount, maxTabs: browserOptions().maxTabs, visibility: browserOptions().visibility, manualLoginCrash: null };
   });
 
   ipcMain.handle('chrome:download-status', async () => {
-    return _chromiumDownload;
+    return { status: 'ready', downloaded: 0, total: 0, error: null };
   });
 
   ipcMain.handle('chrome:launch', async () => {
     try {
-      _chromiumDownload = { status: 'downloading', downloaded: 0, total: 0, error: null };
       const email = config?.is24?.email || config?.persona?.email || 'default';
       const result = await chromeManager.launch(email, browserOptions());
-      _chromiumDownload = { status: 'ready', downloaded: 0, total: 0, error: null };
       return { ...result, error: null };
     } catch (err) {
-      _chromiumDownload = { status: 'error', downloaded: 0, total: 0, error: err.message };
       return gracefulFailure('chrome:launch', err, { code: 'BROWSER_START_FAILED' });
     }
   });
 
   ipcMain.handle('chrome:openLogin', async () => {
     try {
-      _chromiumDownload = { status: 'downloading', downloaded: 0, total: 0, error: null };
       const email = config?.is24?.email || config?.persona?.email || 'default';
       const result = await chromeManager.openLoginPage(email, browserOptions());
-      _chromiumDownload = { status: 'ready', downloaded: 0, total: 0, error: null };
       return { ...result, error: null };
     } catch (err) {
-      _chromiumDownload = { status: 'error', downloaded: 0, total: 0, error: err.message };
       return gracefulFailure('chrome:openLogin', err, { code: 'BROWSER_START_FAILED' });
     }
   });
@@ -1351,6 +1337,10 @@ function deepMerge(target, patch) {
 
 app.whenReady().then(async () => {
   app.setName('Homelander');
+
+  // Enable CDP on Electron's own Chromium so the daemon and Puppeteer
+  // can drive IS24 automation without a separate Chrome download.
+  app.commandLine.appendSwitch('remote-debugging-port', '9222');
 
   loadConfig();
   registerIpcHandlers();

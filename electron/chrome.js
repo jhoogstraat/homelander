@@ -1,284 +1,30 @@
 // Bundled Chromium manager for Homelander.
-// Owns one Puppeteer-managed Chromium profile, keeps CDP available for the daemon,
-// and controls browser visibility without touching user-owned tabs.
+// Uses Electron's own Chromium (via CDP on port 9222) — no separate
+// Chrome download or process spawn required.
 
-import { existsSync, mkdirSync, appendFileSync, statSync } from 'node:fs';
-import { rm } from 'node:fs/promises';
-import { join, dirname } from 'node:path';
-import { createHash } from 'node:crypto';
-import { homedir } from 'node:os';
-import { spawn } from 'node:child_process';
+import { appendFileSync } from 'node:fs';
+import { join } from 'node:path';
 import puppeteer from 'puppeteer';
-import { install, computeExecutablePath, detectBrowserPlatform, Browser, resolveBuildId } from '@puppeteer/browsers';
 
 const CDP_PORT = 9222;
-const DEFAULT_MAX_TABS = 5;
-const DEFAULT_WINDOW_POSITION = { left: 80, top: 60, width: 1200, height: 850 };
 const IS24_HOME = 'https://www.immobilienscout24.de/';
 /** Logged-catch replacement — never throws, logs to console. */
 function swallow(err, context) {
   try { console.error(`[chrome] ${context}: ${err?.message || err}`); } catch {}
 }
 
-
-function getBundledChromiumPath() {
-  try {
-    const executablePath = puppeteer.executablePath();
-    if (executablePath && existsSync(executablePath)) return executablePath;
-  } catch (err) { swallow(err, 'get-bundled-chromium'); }
-  return null;
-}
-
-/**
- * Download Chrome for Testing to the real filesystem (~/.cache/puppeteer).
- * Needed on fresh installs (especially Windows) where the ASAR packaging
- * prevents puppeteer from resolving its internal download manifest.
- *
- * Uses the same build ID that Puppeteer 24 expects — obtained from
- * resolveBuildId(Browser.CHROME) against Chrome's update API.
- *
- * Thread-safe via _downloadPromise: only one download runs at a time,
- * all concurrent callers wait on the same promise.
- */
-async function ensureChromiumInstalled(log = () => {}, onProgress = () => {}, chromeMgr = null) {
-  const cacheDir = join(homedir(), '.cache', 'puppeteer');
-
-  if (chromeMgr?._downloadPromise) {
-    log('Reusing in-flight download promise');
-    return chromeMgr._downloadPromise;
-  }
-
-  const buildId = '148.0.7778.97';
-  const platform = detectBrowserPlatform();
-  log(`Platform: ${platform}, buildId: ${buildId}`);
-
-  // Fast path: already installed
-  let exePath;
-  try {
-    exePath = computeExecutablePath({ browser: Browser.CHROME, buildId, cacheDir });
-    log(`Computed path: ${exePath}, exists: ${existsSync(exePath)}`);
-    if (existsSync(exePath)) return exePath;
-  } catch (e) { log(`computeExecutablePath failed: ${e?.message || e}`); }
-
-  // Also search for any chrome.exe in the cache dir (install may use
-  // a different directory layout than computeExecutablePath expects).
-  if (exePath) {
-    const found = await findChromeExe(dirname(dirname(exePath)), log);
-    if (found) { log(`Found Chrome at: ${found}`); return found; }
-  }
-
-  log('Chrome for Testing not found — downloading (~250 MB)…');
-
-  const downloadPromise = (async () => {
-    let attempt = 0;
-    const maxAttempts = 3;
-
-    while (attempt < maxAttempts) {
-      attempt++;
-      try {
-        log(`Download attempt ${attempt}/${maxAttempts}`);
-        await install({
-          browser: Browser.CHROME,
-          buildId,
-          cacheDir,
-          platform: detectBrowserPlatform(),
-          unpack: true,
-          onProgress: (downloaded, total) => {
-            try { onProgress(downloaded, total); } catch {}
-          },
-        });
-        log('Install completed, searching for executable…');
-      } catch (err) {
-        const msg = err?.message || '';
-        log(`Install failed: ${msg}`);
-        if (msg.includes('exists but the executable') && exePath) {
-          const installRoot = dirname(dirname(exePath));
-          log(`Cleaning ${installRoot}…`);
-          await rm(installRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });
-          continue; // retry
-        }
-        if (chromeMgr) chromeMgr._downloadPromise = null;
-        throw new Error(`Failed to download Chromium: ${msg}`);
-      }
-
-      // Search for the actual exe — don't trust computeExecutablePath layout
-      const installRoot = dirname(dirname(exePath || computeExecutablePath({ browser: Browser.CHROME, buildId, cacheDir })));
-      const found = await findChromeExe(installRoot, log);
-      if (found) {
-        log(`Chrome for Testing installed: ${found}`);
-        if (chromeMgr) chromeMgr._downloadPromise = null;
-        return found;
-      }
-      log(`Attempt ${attempt}: exe not found, retrying…`);
-    }
-
-    if (chromeMgr) chromeMgr._downloadPromise = null;
-    throw new Error(`Chromium download failed after ${maxAttempts} attempts. Check disk space and antivirus.`);
-  })();
-
-  if (chromeMgr) chromeMgr._downloadPromise = downloadPromise;
-  return downloadPromise;
-}
-
-/** Walk a directory tree and find the Chrome executable. */
-async function findChromeExe(root, log) {
-  try {
-    const { readdir, stat } = await import('node:fs/promises');
-    const isWin = process.platform === 'win32';
-    const target = isWin ? 'chrome.exe' : 'chrome';
-    const walk = async (dir) => {
-      let entries;
-      try { entries = await readdir(dir); } catch { return null; }
-      for (const name of entries) {
-        const full = join(dir, name);
-        let st;
-        try { st = await stat(full); } catch { continue; }
-        if (st.isFile() && name.toLowerCase() === target.toLowerCase()) {
-          return full;
-        }
-        if (st.isDirectory()) {
-          const found = await walk(full);
-          if (found) return found;
-        }
-      }
-      return null;
-    };
-    return await walk(root);
-  } catch (e) {
-    log(`findChromeExe error: ${e?.message || e}`);
-    return null;
-  }
-}
-
-function getProfileDir(email) {
-  const hash = createHash('sha256').update(email || 'default').digest('hex').slice(0, 12);
-  return join(homedir(), '.homelander', 'chrome-profiles', `profile-${hash}`);
-}
-
-function clampMaxTabs(maxTabs) {
-  const n = Number(maxTabs || DEFAULT_MAX_TABS);
-  return Math.min(5, Math.max(1, Number.isFinite(n) ? Math.floor(n) : DEFAULT_MAX_TABS));
-}
-
 export class ChromeManager {
   constructor() {
     this.browser = null;
     this.cdpUrl = `http://localhost:${CDP_PORT}`;
-    this.profileDir = null;
-    this.manualLoginProcess = null;
-    this._restartWindow = [];
-    this._maxRestartsPerHour = 3;
-    this._downloadPromise = null; // reuse in-flight download
-    this._lastManualLoginCrash = null; // crash diagnostics from openManualLoginPage
+    this.manualLoginWindow = null;
+    this.manualLoginProcess = null; // compat stub for status checks
   }
 
-  _options(options = {}) {
-    return {
-      visibility: options.visibility || 'hidden_unless_needed',
-      maxTabs: clampMaxTabs(options.maxTabs),
-    };
-  }
-
-  async launch(email, options = {}) {
-    const opts = this._options(options);
-    this.profileDir = getProfileDir(email);
-
-    // If setup browser is still running, connect to it — keep the session alive.
-    if (this.isManualLoginRunning()) {
-      await this._waitForCdp(15000);
-      await this._connectExisting().catch((err) => { swallow(err, 'connect-existing'); });
-      if (opts.visibility === 'always_show') await this.showBrowser();
-      else await this.hideBrowser().catch((err) => { swallow(err, 'hide-browser'); });
-      return this._versionInfo();
-    }
-
-    if (await this.isHealthy()) {
-      await this._connectExisting().catch((err) => { swallow(err, 'connect-existing'); });
-      if (opts.visibility === 'always_show') await this.showBrowser();
-      else await this.hideBrowser().catch((err) => { swallow(err, 'hide-browser'); });
-      return this._versionInfo();
-    }
-
-    let executablePath = getBundledChromiumPath();
-    if (!executablePath) {
-      // Auto-download Chrome for Testing on fresh/Windows installs.
-      const log = (msg) => console.log(`[chrome] ${msg}`);
-      const onProgress = this._onDownloadProgress || (() => {});
-      executablePath = await ensureChromiumInstalled(log, onProgress, this);
-    }
-    mkdirSync(this.profileDir, { recursive: true });
-
-    const now = Date.now();
-    this._restartWindow = this._restartWindow.filter(t => now - t < 3600000);
-    if (this._restartWindow.length >= this._maxRestartsPerHour) {
-      throw new Error('Too many Chromium restarts. Please wait and try again.');
-    }
-    this._restartWindow.push(now);
-
-    this.browser = await puppeteer.launch({
-      executablePath,
-      headless: false,
-      defaultViewport: null,
-      userDataDir: this.profileDir,
-      ignoreDefaultArgs: ['--enable-automation'],
-      args: [
-        `--remote-debugging-port=${CDP_PORT}`,
-        ...(opts.visibility === 'always_show'
-          ? ['--window-size=1200,850']
-          : [`--window-position=${DEFAULT_WINDOW_POSITION.left},${DEFAULT_WINDOW_POSITION.top}`, '--inactive']),
-        '--disable-blink-features=AutomationControlled',
-        '--no-first-run',
-        '--no-default-browser-check',
-        '--disable-background-networking',
-        '--disable-sync',
-        '--disable-default-apps',
-        '--disable-extensions',
-        '--disable-popup-blocking',
-        '--disable-prompt-on-repost',
-        '--disable-hang-monitor',
-        '--disable-translate',
-        '--no-pings',
-
-        // Anti-throttling: prevent Chromium from de-prioritising JS timers,
-        // requestAnimationFrame, and IPC for occluded/backgrounded windows.
-        '--disable-background-timer-throttling',
-        '--disable-backgrounding-occluded-windows',
-        '--disable-renderer-backgrounding',
-        '--disable-ipc-flooding-protection',
-
-        // macOS-specific: tell Chromium to ignore native occlusion signals
-        // (WindowServer "hidden" flag) and intensive wake-up throttling.
-        '--disable-features=NetworkServiceSandbox,CalculateNativeWinOcclusion,IntensiveWakeUpThrottling,MacWindowOcclusion',
-      ],
-    });
-
-    // --remote-debugging-port forces navigator.webdriver=true in Chrome 148+.
-    // IS24 detects this and rejects sessions. Override on all pages.
-    const injectWebdriverOverride = async (page) => {
-      try {
-        await page.evaluateOnNewDocument(() => {
-          Object.defineProperty(navigator, 'webdriver', { get: () => false });
-        });
-      } catch { /* page might close before injection */ }
-    };
-    for (const p of await this.browser.pages()) {
-      await injectWebdriverOverride(p).catch(() => {});
-    }
-    this.browser.on('targetcreated', async (target) => {
-      if (target.type() === 'page') {
-        try { const p = await target.page(); if (p) await injectWebdriverOverride(p); } catch {}
-      }
-    });
-
-    this.browser.on('disconnected', () => { this.browser = null; });
-
-    await this._waitForCdp(30000);
-    const pages = await this.browser.pages();
-    if (pages.length === 0) await this.browser.newPage();
-    const page = (await this.browser.pages())[0];
-    if (page && page.url() === 'about:blank') {
-      await page.goto(IS24_HOME, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch((err) => { swallow(err, 'navigate-is24-home'); });
-    }
+  async launch(_email, _options = {}) {
+    // Electron already has CDP running on port 9222 — just connect.
+    await this._waitForCdp(15000);
+    await this._connectExisting().catch((err) => { swallow(err, 'connect-existing'); });
     return this._versionInfo();
   }
 
@@ -347,36 +93,10 @@ export class ChromeManager {
     }
   }
 
-  async _setWindowBounds(page, bounds) {
-    if (!page) return;
-    const session = await page.target().createCDPSession();
-    try {
-      const { windowId } = await session.send('Browser.getWindowForTarget');
-      await session.send('Browser.setWindowBounds', { windowId, bounds });
-    } finally {
-      await session.detach().catch((err) => { swallow(err, 'session-detach'); });
-    }
-  }
-  async showBrowser() {
-    const browser = await this._connectExisting();
-    const page = (await browser.pages())[0];
-    if (!page) return;
-    await this._setWindowBounds(page, DEFAULT_WINDOW_POSITION);
-    await page.bringToFront().catch((err) => { swallow(err, 'bring-to-front'); });
-  }
-
-  async hideBrowser() {
-    // Intentional no-op — macOS handles background windows fine without
-    // forced off-screen positioning (which causes window-management issues).
-  }
-
-  async openUrl(url, email, options = {}) {
-    const opts = this._options(options);
-    await this.launch(email, { ...opts, visibility: 'always_show' });
+  async openUrl(url, _email, _options = {}) {
     const browser = await this._connectExisting();
     const page = await browser.newPage();
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch((err) => { swallow(err, 'open-url-goto'); });
-    await this.showBrowser();
     return this._versionInfo();
   }
 
@@ -385,50 +105,24 @@ export class ChromeManager {
   }
 
   isManualLoginRunning() {
-    return !!this.manualLoginProcess && this.manualLoginProcess.exitCode === null && !this.manualLoginProcess.killed;
+    return !!(this.manualLoginWindow && !this.manualLoginWindow.isDestroyed());
   }
 
-  async stopManualLoginProcess(timeoutMs = 20000) {
-    const proc = this.manualLoginProcess;
-    if (!proc) return;
-    if (proc.exitCode !== null || proc.killed) {
-      this.manualLoginProcess = null;
-      return;
+  async stopManualLoginProcess(_timeoutMs = 20000) {
+    if (this.manualLoginWindow && !this.manualLoginWindow.isDestroyed()) {
+      this.manualLoginWindow.close();
     }
-
-    const isWin = process.platform === 'win32';
-    // Windows: POSIX signals don't exist; proc.kill() always calls TerminateProcess.
-    // Skip the graceful SIGTERM step and just force-kill.
-    if (isWin) {
-      try { proc.kill(); } catch { this.manualLoginProcess = null; return; }
-      this.manualLoginProcess = null;
-      return;
-    }
-
-    try { proc.kill('SIGTERM'); } catch { this.manualLoginProcess = null; return; }
-
-    await new Promise((resolve) => {
-      let settled = false;
-      const done = () => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(killTimer);
-        if (this.manualLoginProcess === proc) this.manualLoginProcess = null;
-        resolve();
-      };
-      const killTimer = setTimeout(() => {
-        try { proc.kill('SIGKILL'); } catch (err) { swallow(err, 'sigkill-manual-login'); }
-        done();
-      }, timeoutMs);
-      proc.once('exit', done);
-    });
+    this.manualLoginWindow = null;
+    this.manualLoginProcess = null;
   }
 
-  async openManualLoginPage(email, options = {}) {
-    this._logToFile(`openManualLoginPage called: email=${email ? 'set' : 'empty'} profileDir=${this.profileDir || 'unset'}`);
+  /**
+   * Open a login window using Electron's own Chromium — no separate Chrome
+   * process to download or spawn. The daemon connects to the same CDP port.
+   */
+  async openManualLoginPage(_email, _options = {}) {
+    this._logToFile(`openManualLoginPage called: usingElectronChrome`);
 
-    // When CDP is already running (e.g. session-expired re-login), don't
-    // restart the browser — just open a fresh IS24 tab via CDP and show it.
     if (await this.isHealthy()) {
       try {
         const browser = await this._connectExisting();
@@ -437,92 +131,40 @@ export class ChromeManager {
         const lastPage = pages[pages.length - 1];
         await lastPage.goto(IS24_HOME, { waitUntil: 'domcontentloaded', timeout: 10000 });
         await lastPage.bringToFront();
-        await this.showBrowser();
         return { cdpConnected: true, manualLogin: false };
-      } catch {
-        // CDP navigation failed — fall through to manual-browser path
+      } catch (e) {
+        this._logToFile(`CDP navigate failed: ${e?.message || e}`);
       }
     }
 
-    this.profileDir = getProfileDir(email);
-    mkdirSync(this.profileDir, { recursive: true });
-
-    if (await this.isHealthy()) await this.shutdown();
-    if (this.isManualLoginRunning()) return { manualLogin: true, profileDir: this.profileDir };
-
-    let executablePath = getBundledChromiumPath();
-    this._logToFile(`getBundledChromiumPath returned: ${executablePath || 'null'}`);
-    if (!executablePath) {
-      executablePath = await ensureChromiumInstalled(
-        (msg) => this._logToFile(`ensureChromium: ${msg}`),
-        this._onDownloadProgress || (() => {}),
-        this
-      );
-    }
-    if (!executablePath) {
-      throw new Error('Bundled Chromium not found. Run npm install so Puppeteer can install its browser.');
+    if (this.manualLoginWindow && !this.manualLoginWindow.isDestroyed()) {
+      this.manualLoginWindow.focus();
+      this.manualLoginWindow.loadURL(IS24_HOME);
+      return { manualLogin: true, usingElectron: true };
     }
 
-    this._logToFile(`Executable resolved: ${executablePath}`);
-
-    // Start Chromium WITH CDP so the daemon can connect to the SAME browser
-    // process — no kill + relaunch, no session loss.
-    // Also disable AutomationControlled so IS24 doesn't flag the login page.
-    //
-    // --enable-logging writes Chrome's own startup diagnostics to a file.
-    // No pipe needed — Chrome writes directly, avoiding Windows pipe deadlocks.
-    const chromeLogFile = join(this.profileDir, 'chrome_debug.log');
-
-    // Log spawn diagnostics to chrome.log so support bundles capture them.
-    this._logToFile(`Spawning Chrome: exe=${executablePath} profile=${this.profileDir} log=${chromeLogFile}`);
-    try {
-      const st = statSync(executablePath);
-      this._logToFile(`Chrome exe exists: size=${st.size} mode=${st.mode.toString(8)}`);
-    } catch (e) {
-      this._logToFile(`Chrome exe stat FAILED: ${e.message}`);
-    }
-
-    this.manualLoginProcess = spawn(executablePath, [
-      `--user-data-dir=${this.profileDir}`,
-      `--remote-debugging-port=${CDP_PORT}`,
-      '--disable-blink-features=AutomationControlled',
-      '--no-first-run',
-      '--no-default-browser-check',
-      '--window-size=1200,850',
-      '--enable-logging',
-      `--log-file=${chromeLogFile}`,
-      IS24_HOME,
-    ], {
-      detached: false,
-      stdio: 'ignore',
+    const { BrowserWindow } = await import('electron');
+    this.manualLoginWindow = new BrowserWindow({
+      width: 1200,
+      height: 850,
+      title: 'Homelander — IS24 Login',
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true,
+      },
     });
 
-    this._logToFile(`Chrome spawned: pid=${this.manualLoginProcess.pid}`);
-
-    // Catch spawn errors (ENOENT / permission denied)
-    this.manualLoginProcess.on('error', (err) => {
-      swallow(err, `manual-login-spawn: ${err.message}`);
-      this._logToFile(`Spawn error: ${err.message}`);
+    this.manualLoginWindow.loadURL(IS24_HOME);
+    this.manualLoginWindow.on('closed', () => {
+      this.manualLoginWindow = null;
     });
 
-    // Detect immediate crash. Fire-and-forget — does NOT block return.
-    // Renderer picks up the failure via chrome:status IPC.
-    let _startupClosed = false;
-    const _startupTimer = setTimeout(() => { _startupClosed = true; }, 3000);
-    this.manualLoginProcess.once('exit', (code) => {
-      clearTimeout(_startupTimer);
-      this.manualLoginProcess = null;
-      this._lastManualLoginCrash = null;
-      if (!_startupClosed && code !== null && code !== 0) {
-        const msg = `Chromium crashed on startup (exit ${code})`;
-        console.error(`[chrome] ${msg}`);
-        this._lastManualLoginCrash = { message: msg, code, at: new Date().toISOString() };
-        this._logToFile(msg);
-      }
-    });
+    this._logToFile(`Login BrowserWindow created`);
 
-    this.manualLoginProcess.unref();
-    return { manualLogin: true, profileDir: this.profileDir };
+    // Compat stub so existing status checks (exitCode, killed) don't crash
+    this.manualLoginProcess = { exitCode: null, killed: false, pid: 0 };
+
+    return { manualLogin: true, usingElectron: true };
   }
 
   /** Append a line to chrome.log (if path configured by main.js). */
@@ -533,20 +175,18 @@ export class ChromeManager {
     } catch { /* best-effort */ }
   }
 
-  async finalizeManualLogin(email, options = {}) {
-    // DO NOT kill the browser. The daemon connects to the same CDP-enabled
-    // Chromium — no process restart, no session loss.
+  async finalizeManualLogin(_email, _options = {}) {
     if (!(await this.isHealthy())) {
       await this._waitForCdp(10000);
     }
     return { manualLogin: false, cdpHealthy: await this.isHealthy() };
   }
 
-  async openListing(exposeIdOrUrl, email, options = {}) {
+  async openListing(exposeIdOrUrl, _email, _options = {}) {
     const url = String(exposeIdOrUrl || '').startsWith('http')
       ? String(exposeIdOrUrl)
       : `https://www.immobilienscout24.de/expose/${encodeURIComponent(String(exposeIdOrUrl))}`;
-    return this.openUrl(url, email, { ...options, visibility: 'always_show' });
+    return this.openUrl(url);
   }
 
   async checkIs24Login() {
@@ -555,13 +195,9 @@ export class ChromeManager {
     try {
       if (!(await this.isHealthy())) return { loggedIn: false, cookies: [] };
       browser = await this._connectExisting();
-
-      // Always open a fresh tab to IS24 home — never rely on leftover tabs
-      // from a previous session, which may be stale expose pages whose
-      // execution context was destroyed (producing false logout negatives).
       checkPage = await browser.newPage();
       await checkPage.goto(IS24_HOME, { waitUntil: 'domcontentloaded', timeout: 10000 });
-      await new Promise(r => setTimeout(r, 1000)); // let React render the header
+      await new Promise(r => setTimeout(r, 1000));
 
       const domLoggedIn = await checkPage.evaluate(() => {
         const visible = (el) => {

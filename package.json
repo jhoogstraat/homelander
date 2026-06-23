@@ -1,6 +1,6 @@
 {
   "name": "homelander",
-  "version": "1.1.21",
+  "version": "1.1.22",
   "private": true,
   "author": "B1Z0N <kolausf@gmail.com>",
   "description": "Desktop app for automated IS24 apartment applications — polls listings, auto-fills contact forms via Chrome CDP.",
@@ -32,7 +32,6 @@
   },
   "dependencies": {
     "better-sqlite3": "^12.11.1",
-    "@puppeteer/browsers": "^2.13.2",
     "puppeteer": "^24.0.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
