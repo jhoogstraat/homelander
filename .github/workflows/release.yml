@@ -7,7 +7,7 @@ on:
         description: 'Platforms to build'
         required: true
         type: choice
-        default: 'mac'
+        default: 'all'
         options:
           - mac
           - win
