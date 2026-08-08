@@ -52,7 +52,13 @@ linux:
     - deb
     - AppImage
   category: Utility
-  icon: resources/icon.png
+  # Must be a DIRECTORY of standard hicolor sizes, not a single PNG. Each source
+  # icon is installed to /usr/share/icons/hicolor/<its-size>/apps/. A lone
+  # 2048x2048 icon.png landed in hicolor/2048x2048/ — not a size in the theme
+  # index, so the freedesktop lookup never found it and v1.5.1 shipped with no
+  # icon. mac/win keep using icon.icns / icon.ico; resources/icon.png is still
+  # the runtime BrowserWindow icon on all platforms.
+  icon: resources/icons
 
 publish:
   provider: github
