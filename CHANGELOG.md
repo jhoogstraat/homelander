@@ -5,6 +5,7 @@ All notable changes to Homelander are documented here. Format follows [Keep a Ch
 ## [Unreleased]
 
 ### Added
+- Experimental Linux builds (x64 `.deb` + `.AppImage`), first published on the v1.5.1 release; Linux enabled in the release workflow matrix
 - Screenshots section in README (Search, History, Settings)
 - Installation section in README with platform table, macOS `xattr -cr`, Windows SmartScreen note
 - Donation support: `.github/FUNDING.yml` (GitHub Sponsors, Buy Me a Coffee, Ko-fi)

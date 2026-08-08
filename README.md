@@ -12,7 +12,7 @@
 <p align="center">
   <a href="https://github.com/B1Z0N/homelander/actions/workflows/ci.yml"><img src="https://github.com/B1Z0N/homelander/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License">
-  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey" alt="Platform">
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey" alt="Platform">
   <img src="https://img.shields.io/badge/electron-42-47848f" alt="Electron 42">
 </p>
 
@@ -76,6 +76,7 @@ Download the latest version from the **[Releases](https://github.com/B1Z0N/homel
 | macOS (Apple Silicon — M1 and newer) | `Homelander-<version>-arm64.dmg` |
 | macOS (Intel) | `Homelander-<version>.dmg` — the one *without* `-arm64` |
 | Windows | `Homelander.Setup.<version>.exe` |
+| Linux (x64 — experimental) | `homelander_<version>_amd64.deb` |
 
 Not sure which Mac you have? **Apple menu → About This Mac**: "Apple M…" means Apple Silicon, "Intel" means Intel.
 
@@ -92,6 +93,16 @@ Then launch from Applications or Spotlight. ([See this step in the video](https:
 ### Windows
 
 Download the `.exe` and run it. Windows SmartScreen may show a warning — click **More info** → **Run anyway**.
+
+### Linux — experimental
+
+x64 only (there is no arm64 build of the bundled browser). Install the `.deb`:
+
+```bash
+sudo apt install ./homelander_<version>_amd64.deb
+```
+
+An `.AppImage` is also published, but the `.deb` is the recommended install. Known limitation: on Ubuntu 23.10+ the bundled browser may fail to launch due to the AppArmor user-namespace restriction — a fix is planned.
 
 ## ⚠️ Disclaimer
 
