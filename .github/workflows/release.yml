@@ -11,7 +11,7 @@ on:
         options:
           - mac
           - win
-        #  - linux
+          - linux
           - all
       version:
         description: 'Version tag (e.g. v1.1.19)'
@@ -36,8 +36,10 @@ jobs:
             platform: mac
             arch: x64
             archFlag: '--x64'
-          # - os: ubuntu-latest
-          #   platform: linux
+          - os: ubuntu-latest
+            platform: linux
+            arch: x64
+            archFlag: ''
           - os: windows-latest
             platform: win
             arch: x64
