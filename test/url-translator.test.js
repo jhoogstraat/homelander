@@ -873,6 +873,33 @@ describe('validateSearchUrl — links the mobile API cannot run', () => {
     assert.equal(result.ok, false);
     assert.match(result.error, /shape/i);
   });
+
+  it('tags each block with a stable errorCode the UI can localize', () => {
+    assert.equal(
+      validateSearchUrl('https://www.immobilienscout24.de/Suche/radius/berlin/wohnung-mieten').errorCode,
+      'radiusMissingCoordinates'
+    );
+    assert.equal(
+      validateSearchUrl('https://www.immobilienscout24.de/Suche/shape/berlin/wohnung-mieten').errorCode,
+      'shapeUnsupported'
+    );
+  });
+
+  it('translates the radius block message into German', () => {
+    const de = validateSearchUrl(
+      'https://www.immobilienscout24.de/Suche/radius/berlin/wohnung-mieten', { locale: 'de' }
+    );
+    assert.match(de.error, /Kartenkoordinaten/);
+    assert.equal(de.error.includes('coordinates'), false);
+  });
+
+  it('translates the shape block message into German', () => {
+    const de = validateSearchUrl(
+      'https://www.immobilienscout24.de/Suche/shape/berlin/wohnung-mieten', { locale: 'de' }
+    );
+    assert.match(de.error, /nicht unterstützt/i);
+    assert.equal(de.error.includes('not supported'), false);
+  });
 });
 
 describe('validateSearchUrl — radius preview', () => {

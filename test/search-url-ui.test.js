@@ -3,7 +3,32 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { deriveSearchName } from '../src/shared/searchUrlUi.js';
+import { deriveSearchName, compactValidationError } from '../src/shared/searchUrlUi.js';
+
+describe('compactValidationError', () => {
+  const t = (_key, fallback) => fallback;
+
+  it('surfaces an already-localized block message over the generic fallback', () => {
+    const validation = {
+      errorCode: 'radiusMissingCoordinates',
+      error: 'Diesem Umkreis-Link fehlen die Kartenkoordinaten.',
+      unsupportedParams: [],
+    };
+    assert.equal(
+      compactValidationError(validation, 'generic fallback', t),
+      'Diesem Umkreis-Link fehlen die Kartenkoordinaten.'
+    );
+  });
+
+  it('still lists unsupported filters when there are any', () => {
+    const validation = { unsupportedParams: [{ key: 'gender', value: 'male' }] };
+    assert.match(compactValidationError(validation, 'generic fallback', t), /gender/);
+  });
+
+  it('falls back to the generic message when there is no block code', () => {
+    assert.equal(compactValidationError({ unsupportedParams: [] }, 'generic fallback', t), 'generic fallback');
+  });
+});
 
 describe('deriveSearchName', () => {
   it('names a region search after its district', () => {

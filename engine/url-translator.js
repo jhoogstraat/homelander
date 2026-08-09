@@ -142,6 +142,8 @@ const PREVIEW_I18N = {
       radiusSuffix: (km) => `${km} km radius`,
       unsupportedFilters: 'Unsupported IS24 search filters',
       mobileRejects: (label) => `The IS24 mobile API rejects ${label} filters; Homelander keeps the supported parts of the search.`,
+      radiusMissingCoordinates: 'This radius link is missing its map coordinates. Open the search on immobilienscout24.de and copy the URL from the results page again.',
+      shapeUnsupported: 'Map-drawn (shape) searches are not supported. Open the search on immobilienscout24.de, switch to a radius or district search, and copy that URL instead.',
     },
   },
   de: {
@@ -194,6 +196,8 @@ const PREVIEW_I18N = {
       radiusSuffix: (km) => `${km} km Umkreis`,
       unsupportedFilters: 'Nicht unterstützte IS24-Suchfilter',
       mobileRejects: (label) => `Die IS24 Mobile API lehnt Filter für ${label} ab; Homelander übernimmt die unterstützten Teile der Suche.`,
+      radiusMissingCoordinates: 'Diesem Umkreis-Link fehlen die Kartenkoordinaten. Öffne die Suche auf immobilienscout24.de und kopiere die URL erneut aus der Ergebnisliste.',
+      shapeUnsupported: 'Auf der Karte gezeichnete Suchen (Shape) werden nicht unterstützt. Wechsle auf immobilienscout24.de zu einer Umkreis- oder Stadtteilsuche und kopiere diese URL.',
     },
   },
 };
@@ -417,12 +421,15 @@ function parseWgSlug(segment) {
   return { size: Number(match[1]), fullText: `${match[1]}er wg`, label: `${match[1]}er WG` };
 }
 
-function emptyResult(error) {
+// errorCode names a PREVIEW_I18N label so validateSearchUrl() can render the
+// message in the caller's locale; without one the English text is used as-is.
+function emptyResult(error, errorCode = null) {
   return {
     canonical: null,
     unsupportedParams: [],
     safeIgnoredParams: [],
     error,
+    errorCode,
   };
 }
 
@@ -580,7 +587,7 @@ export function parseSearchUrl(webUrl) {
     // Homelander does not translate — every shape URL either 412s or arrives
     // with an unknown `shape` param. Say so instead of building a dead URL.
     if (searchType === 'shape') {
-      return emptyResult('Map-drawn (shape) searches are not supported. Open the search on immobilienscout24.de, switch to a radius or district search, and copy that URL instead.');
+      return emptyResult(PREVIEW_I18N.en.labels.shapeUnsupported, 'shapeUnsupported');
     }
 
     const canonical = {
@@ -701,7 +708,7 @@ export function parseSearchUrl(webUrl) {
     }
 
     if (canonical.searchType === 'radius' && !canonical.location.center) {
-      return emptyResult('This radius link is missing its map coordinates. Open the search on immobilienscout24.de and copy the URL from the results page again.');
+      return emptyResult(PREVIEW_I18N.en.labels.radiusMissingCoordinates, 'radiusMissingCoordinates');
     }
 
     canonical.heatingTypes = [...new Set(canonical.heatingTypes)];
@@ -836,7 +843,12 @@ export function validateSearchUrl(webUrl, options = {}) {
   const i18n = previewLocale(locale);
   const parsed = parseSearchUrl(webUrl);
   if (parsed.error) {
-    return { ok: false, error: parsed.error, ...parsed, preview: { location: '', filters: [] }, mobileUrl: '' };
+    // Blocks carrying an errorCode render in the caller's locale; anything else
+    // keeps its raw message for the generic userErrors mapping downstream.
+    const localized = parsed.errorCode && i18n.labels[parsed.errorCode]
+      ? i18n.labels[parsed.errorCode]
+      : parsed.error;
+    return { ok: false, ...parsed, error: localized, preview: { location: '', filters: [] }, mobileUrl: '' };
   }
   const preview = previewFor(parsed.canonical, locale);
   const dangerous = parsed.unsupportedParams.filter(p => p.risk === 'dangerous');

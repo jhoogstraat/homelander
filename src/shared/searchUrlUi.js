@@ -35,6 +35,9 @@ export function deriveSearchName(url) {
 
 /** Compact validation error for the visible dialog; raw details stay in preview metadata. */
 export function compactValidationError(validation, fallback, t) {
+  // Blocks that carry an errorCode were already localized by validateSearchUrl
+  // and say something actionable — prefer them over the generic userErrors text.
+  if (validation?.errorCode && validation.error) return validation.error;
   const unsupported = validation?.unsupportedParams || [];
   if (unsupported.length) {
     const names = [...new Set(unsupported.map(p => p.key))];
