@@ -875,6 +875,33 @@ describe('validateSearchUrl — links the mobile API cannot run', () => {
   });
 });
 
+describe('validateSearchUrl — radius preview', () => {
+  it('shows centre and radius in English', () => {
+    const result = validateSearchUrl(RADIUS_URL);
+    assert.equal(result.ok, true);
+    assert.equal(result.preview.location, 'Hamburg, Altona · 1 km radius');
+  });
+
+  it('shows centre and radius in German', () => {
+    const result = validateSearchUrl(RADIUS_URL, { locale: 'de' });
+    assert.equal(result.preview.location, 'Hamburg, Altona · 1 km Umkreis');
+  });
+
+  it('never reports a radius search as nationwide', () => {
+    const en = validateSearchUrl(RADIUS_URL);
+    const de = validateSearchUrl(RADIUS_URL, { locale: 'de' });
+    assert.equal(en.preview.location.includes('All Germany'), false);
+    assert.equal(de.preview.location.includes('Deutschlandweit'), false);
+  });
+
+  it('renders a fractional radius without trailing zeroes', () => {
+    const result = validateSearchUrl(
+      'https://www.immobilienscout24.de/Suche/radius/wohnung-mieten?geocoordinates=53.55073;9.93549;2.50'
+    );
+    assert.equal(result.preview.location, '53.551, 9.935 · 2.5 km radius');
+  });
+});
+
 // ---------------------------------------------------------------------------
 // translateUrl — error cases
 // ---------------------------------------------------------------------------

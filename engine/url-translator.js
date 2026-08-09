@@ -139,6 +139,7 @@ const PREVIEW_I18N = {
       pets: 'Pets',
       any: 'any',
       selected: 'selected',
+      radiusSuffix: (km) => `${km} km radius`,
       unsupportedFilters: 'Unsupported IS24 search filters',
       mobileRejects: (label) => `The IS24 mobile API rejects ${label} filters; Homelander keeps the supported parts of the search.`,
     },
@@ -190,6 +191,7 @@ const PREVIEW_I18N = {
       pets: 'Haustiere',
       any: 'egal',
       selected: 'ausgewählt',
+      radiusSuffix: (km) => `${km} km Umkreis`,
       unsupportedFilters: 'Nicht unterstützte IS24-Suchfilter',
       mobileRejects: (label) => `Die IS24 Mobile API lehnt Filter für ${label} ab; Homelander übernimmt die unterstützten Teile der Suche.`,
     },
@@ -816,6 +818,12 @@ function previewFor(canonical, locale = 'en') {
     filters.push(labels.length > 3 ? `${i18n.labels.equipment}: ${labels.length} ${i18n.labels.selected}` : `${i18n.labels.equipment}: ${labels.join(', ')}`);
   }
   for (const directParam of canonical.directParams || []) filters.push(formatDirectParamPreview(directParam, i18n));
+  const center = canonical.location?.center;
+  if (center) {
+    // radiusKm is already a Number, so 1.0 and 2.50 render as "1" and "2.5".
+    const suffix = i18n.labels.radiusSuffix(String(center.radiusKm));
+    return { location: `${canonical.location.label} · ${suffix}`, filters };
+  }
   const locationLabel = canonical.location?.label === PREVIEW_I18N.en.labels.allGermany
     ? i18n.labels.allGermany
     : (canonical.location?.label || i18n.labels.allGermany);
