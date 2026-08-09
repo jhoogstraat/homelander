@@ -733,18 +733,19 @@ describe('translateUrl — edge cases', () => {
 
   it('handles radius search type', () => {
     const { fullUrl, error } = translateUrl(
-      'https://www.immobilienscout24.de/Suche/radius/berlin/wohnung-mieten'
+      'https://www.immobilienscout24.de/Suche/radius/berlin/wohnung-mieten?geocoordinates=52.52;13.405;5.0'
     );
     assert.equal(error, null);
     assert.ok(fullUrl.includes('searchType=radius'));
+    assert.ok(fullUrl.includes('geocoordinates='));
   });
 
-  it('handles shape search type', () => {
+  it('rejects shape search type — the mobile API cannot run map-drawn polygons', () => {
     const { fullUrl, error } = translateUrl(
       'https://www.immobilienscout24.de/Suche/shape/berlin/wohnung-mieten'
     );
-    assert.equal(error, null);
-    assert.ok(fullUrl.includes('searchType=shape'));
+    assert.match(error, /shape/i);
+    assert.equal(fullUrl, '');
   });
 
   it('encodes special characters in path segments', () => {
@@ -846,6 +847,31 @@ describe('buildMobileApiUrl — radius searches', () => {
     assert.equal(params.get('geocodes'), '/de/hamburg/hamburg/altona');
     assert.equal(params.get('searchType'), 'region');
     assert.equal(params.has('geocoordinates'), false);
+  });
+});
+
+describe('validateSearchUrl — links the mobile API cannot run', () => {
+  it('blocks a radius link that carries no coordinates', () => {
+    const result = validateSearchUrl(
+      'https://www.immobilienscout24.de/Suche/radius/berlin/wohnung-mieten'
+    );
+    assert.equal(result.ok, false);
+    assert.match(result.error, /coordinates/i);
+  });
+
+  it('does not quietly downgrade a coordinate-less radius link to a city search', () => {
+    const result = validateSearchUrl(
+      'https://www.immobilienscout24.de/Suche/radius/berlin/wohnung-mieten'
+    );
+    assert.equal(result.mobileUrl, '');
+  });
+
+  it('blocks map-drawn shape links', () => {
+    const result = validateSearchUrl(
+      'https://www.immobilienscout24.de/Suche/shape/berlin/wohnung-mieten'
+    );
+    assert.equal(result.ok, false);
+    assert.match(result.error, /shape/i);
   });
 });
 

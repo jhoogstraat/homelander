@@ -574,6 +574,13 @@ export function parseSearchUrl(webUrl) {
       ? rawGeocodeParts.slice(1)
       : rawGeocodeParts;
 
+    // Shape searches need a polygon param the mobile API calls `shape`, which
+    // Homelander does not translate — every shape URL either 412s or arrives
+    // with an unknown `shape` param. Say so instead of building a dead URL.
+    if (searchType === 'shape') {
+      return emptyResult('Map-drawn (shape) searches are not supported. Open the search on immobilienscout24.de, switch to a radius or district search, and copy that URL instead.');
+    }
+
     const canonical = {
       originalUrl: url.toString(),
       realEstateType: REALESTATE_TYPE_MAP[realEstatePathType] || 'apartmentrent',
@@ -689,6 +696,10 @@ export function parseSearchUrl(webUrl) {
     if (canonical.location.center) {
       const { lat, lon } = canonical.location.center;
       canonical.location.label = centerAddress || `${lat.toFixed(3)}, ${lon.toFixed(3)}`;
+    }
+
+    if (canonical.searchType === 'radius' && !canonical.location.center) {
+      return emptyResult('This radius link is missing its map coordinates. Open the search on immobilienscout24.de and copy the URL from the results page again.');
     }
 
     canonical.heatingTypes = [...new Set(canonical.heatingTypes)];
