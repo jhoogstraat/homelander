@@ -32,7 +32,7 @@ export default function AddSearchDialog({ onCancel, onAdd }) {
       const result = await window.homelander.testFilter(url.trim(), locale);
       setValidation(result.validation || null);
       if (result.error) {
-        setTestError(compactValidationError(result.validation, userErrorText(result.userError || result, { operation: 'search test' }), t));
+        setTestError(compactValidationError(result.validation, userErrorText(result.userError || result, { operation: 'search test' }, t), t));
       } else {
         setTestResult(result.total);
       }
@@ -59,7 +59,7 @@ export default function AddSearchDialog({ onCancel, onAdd }) {
         const result = await window.homelander.testFilter(url.trim(), locale);
         setValidation(result.validation || null);
         if (result.error) {
-          setTestError(compactValidationError(result.validation, userErrorText(result.userError || result, { operation: 'search test' }), t));
+          setTestError(compactValidationError(result.validation, userErrorText(result.userError || result, { operation: 'search test' }, t), t));
           setTesting(false);
           return;
         }

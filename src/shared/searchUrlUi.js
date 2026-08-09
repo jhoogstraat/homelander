@@ -11,12 +11,22 @@ export function deriveSearchName(url) {
     if (sucheIdx < 0) return '';
     // The type is the last segment (ends with -mieten, -kaufen, etc.)
     const rawType = parts[parts.length - 1] || '';
-    // City is the segment before the type
-    const city = parts[parts.length - 2] || '';
+    // City is the segment before the type. /Suche/radius/… and /Suche/shape/…
+    // put a search-mode keyword there instead, so fall back to the
+    // human-readable centre from the query.
+    let city = parts[parts.length - 2] || '';
+    if (city.toLowerCase() === 'radius' || city.toLowerCase() === 'shape') {
+      city = (u.searchParams.get('centerofsearchaddress') || '')
+        .split(/[;,]/)
+        .map(s => s.trim())
+        .filter(Boolean)
+        .join(', ');
+    }
     const cityName = city.charAt(0).toUpperCase() + city.slice(1).replace(/-/g, ' ');
     const typeName = rawType.replace(/-/g, ' ').replace(/mieten/, 'zur Miete').replace(/kaufen/, 'zum Kauf');
     if (!cityName && !typeName) return '';
     if (!typeName) return cityName;
+    if (!cityName) return typeName;
     return `${cityName} · ${typeName}`;
   } catch {
     return '';
@@ -25,6 +35,9 @@ export function deriveSearchName(url) {
 
 /** Compact validation error for the visible dialog; raw details stay in preview metadata. */
 export function compactValidationError(validation, fallback, t) {
+  // Blocks that carry an errorCode were already localized by validateSearchUrl
+  // and say something actionable — prefer them over the generic userErrors text.
+  if (validation?.errorCode && validation.error) return validation.error;
   const unsupported = validation?.unsupportedParams || [];
   if (unsupported.length) {
     const names = [...new Set(unsupported.map(p => p.key))];

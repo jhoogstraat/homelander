@@ -139,8 +139,11 @@ const PREVIEW_I18N = {
       pets: 'Pets',
       any: 'any',
       selected: 'selected',
+      radiusSuffix: (km) => `${km} km radius`,
       unsupportedFilters: 'Unsupported IS24 search filters',
       mobileRejects: (label) => `The IS24 mobile API rejects ${label} filters; Homelander keeps the supported parts of the search.`,
+      radiusMissingCoordinates: 'This radius link is missing its map coordinates. Open the search on immobilienscout24.de and copy the URL from the results page again.',
+      shapeUnsupported: 'Map-drawn (shape) searches are not supported. Open the search on immobilienscout24.de, switch to a radius or district search, and copy that URL instead.',
     },
   },
   de: {
@@ -190,8 +193,11 @@ const PREVIEW_I18N = {
       pets: 'Haustiere',
       any: 'egal',
       selected: 'ausgewählt',
+      radiusSuffix: (km) => `${km} km Umkreis`,
       unsupportedFilters: 'Nicht unterstützte IS24-Suchfilter',
       mobileRejects: (label) => `Die IS24 Mobile API lehnt Filter für ${label} ab; Homelander übernimmt die unterstützten Teile der Suche.`,
+      radiusMissingCoordinates: 'Diesem Umkreis-Link fehlen die Kartenkoordinaten. Öffne die Suche auf immobilienscout24.de und kopiere die URL erneut aus der Ergebnisliste.',
+      shapeUnsupported: 'Auf der Karte gezeichnete Suchen (Shape) werden nicht unterstützt. Wechsle auf immobilienscout24.de zu einer Umkreis- oder Stadtteilsuche und kopiere diese URL.',
     },
   },
 };
@@ -415,12 +421,15 @@ function parseWgSlug(segment) {
   return { size: Number(match[1]), fullText: `${match[1]}er wg`, label: `${match[1]}er WG` };
 }
 
-function emptyResult(error) {
+// errorCode names a PREVIEW_I18N label so validateSearchUrl() can render the
+// message in the caller's locale; without one the English text is used as-is.
+function emptyResult(error, errorCode = null) {
   return {
     canonical: null,
     unsupportedParams: [],
     safeIgnoredParams: [],
     error,
+    errorCode,
   };
 }
 
@@ -452,6 +461,32 @@ function formatRange(range) {
   const max = range.max ?? '';
   if (range.min !== null && range.max !== null && range.min === range.max) return String(range.min);
   return `${min}-${max}`;
+}
+
+// IS24 radius searches carry the circle in the query string as
+// geocoordinates=lat;lon;radiusKm. Returns null for anything malformed —
+// callers surface that through unsupportedParams rather than guessing a
+// location, because a wrong guess silently searches the wrong place.
+function parseGeoCoordinates(raw) {
+  const parts = String(raw ?? '').split(';').map(p => p.trim());
+  if (parts.length !== 3 || parts.some(p => p === '')) return null;
+  const [lat, lon, radiusKm] = parts.map(Number);
+  if (![lat, lon, radiusKm].every(Number.isFinite)) return null;
+  if (lat < -90 || lat > 90) return null;
+  if (lon < -180 || lon > 180) return null;
+  if (radiusKm <= 0) return null;
+  return { lat, lon, radiusKm };
+}
+
+// centerofsearchaddress is display-only: IS24 varies its separators between
+// URL shapes, so parse defensively. The value never reaches the mobile API,
+// so a wrong guess about the format is cosmetic, never functional.
+function formatCenterAddress(raw) {
+  return String(raw ?? '')
+    .split(/[;,]/)
+    .map(p => p.trim())
+    .filter(Boolean)
+    .join(', ');
 }
 
 function splitValues(value) {
@@ -548,6 +583,13 @@ export function parseSearchUrl(webUrl) {
       ? rawGeocodeParts.slice(1)
       : rawGeocodeParts;
 
+    // Shape searches need a polygon param the mobile API calls `shape`, which
+    // Homelander does not translate — every shape URL either 412s or arrives
+    // with an unknown `shape` param. Say so instead of building a dead URL.
+    if (searchType === 'shape') {
+      return emptyResult(PREVIEW_I18N.en.labels.shapeUnsupported, 'shapeUnsupported');
+    }
+
     const canonical = {
       originalUrl: url.toString(),
       realEstateType: REALESTATE_TYPE_MAP[realEstatePathType] || 'apartmentrent',
@@ -557,6 +599,7 @@ export function parseSearchUrl(webUrl) {
         path: geocodeParts,
         geocode: geocodeParts.length ? `/${geocodeParts.join('/')}` : '',
         label: geocodeParts.length ? geocodeParts.filter(p => p !== 'de').map(titleizeSlug).join(' / ') : 'All Germany',
+        center: null,
       },
       construction: { newBuildingOnly: NEW_BUILD_TYPES.has(realEstatePathType) },
       price: seoPathParams?.price || { min: null, max: null, type: PRICE_TYPE_MAP[realEstatePathType] || 'calculatedtotalrent' },
@@ -574,6 +617,7 @@ export function parseSearchUrl(webUrl) {
     const unsupportedParams = [];
     const safeIgnoredParams = [];
     const seenKnownKeys = new Set();
+    let centerAddress = '';
 
     for (const [rawKey, value] of url.searchParams) {
       const key = rawKey.toLowerCase();
@@ -635,11 +679,36 @@ export function parseSearchUrl(webUrl) {
         const mapped = EQUIPMENT_MAP[key];
         if (mapped) canonical.equipment.push(mapped);
         seenKnownKeys.add(key);
+      } else if (key === 'geocoordinates') {
+        // The circle itself. Mutates canonical.searchType, not the local const —
+        // canonical was already built from it, so canonical holds the truth.
+        const center = parseGeoCoordinates(value);
+        if (center) {
+          canonical.location.center = center;
+          canonical.searchType = 'radius';
+        } else {
+          unsupportedParams.push({ key: rawKey, value, risk: 'dangerous' });
+        }
+        seenKnownKeys.add(key);
+      } else if (key === 'centerofsearchaddress') {
+        centerAddress = formatCenterAddress(value);
+        seenKnownKeys.add(key);
       } else if (isSafeIgnoredParam(rawKey)) {
         safeIgnoredParams.push({ key: rawKey, value });
       } else {
         unsupportedParams.push({ key: rawKey, value, risk: 'dangerous' });
       }
+    }
+
+    // A radius URL usually has no geocode path at all, which is what made the
+    // preview claim "All Germany" while actually dropping the location.
+    if (canonical.location.center) {
+      const { lat, lon } = canonical.location.center;
+      canonical.location.label = centerAddress || `${lat.toFixed(3)}, ${lon.toFixed(3)}`;
+    }
+
+    if (canonical.searchType === 'radius' && !canonical.location.center) {
+      return emptyResult(PREVIEW_I18N.en.labels.radiusMissingCoordinates, 'radiusMissingCoordinates');
     }
 
     canonical.heatingTypes = [...new Set(canonical.heatingTypes)];
@@ -654,8 +723,16 @@ export function parseSearchUrl(webUrl) {
 /** Build a mobile API list URL from a canonical search model. */
 export function buildMobileApiUrl(canonical, { page = 1, pageSize = 20, includeListControls = true } = {}) {
   const params = new URLSearchParams();
-  if (canonical.location?.geocode) params.set('geocodes', canonical.location.geocode);
-  params.set('searchType', canonical.searchType || 'region');
+  const center = canonical.location?.center;
+  if (center) {
+    // The API requires geocoordinates for a radius search and ignores geocodes
+    // when both are present — omit geocodes rather than rely on that precedence.
+    params.set('searchType', 'radius');
+    params.set('geocoordinates', `${center.lat};${center.lon};${center.radiusKm}`);
+  } else {
+    if (canonical.location?.geocode) params.set('geocodes', canonical.location.geocode);
+    params.set('searchType', canonical.searchType || 'region');
+  }
   params.set('realestatetype', canonical.realEstateType || 'apartmentrent');
   if (canonical.price?.type) params.set('pricetype', canonical.price.type);
 
@@ -748,6 +825,12 @@ function previewFor(canonical, locale = 'en') {
     filters.push(labels.length > 3 ? `${i18n.labels.equipment}: ${labels.length} ${i18n.labels.selected}` : `${i18n.labels.equipment}: ${labels.join(', ')}`);
   }
   for (const directParam of canonical.directParams || []) filters.push(formatDirectParamPreview(directParam, i18n));
+  const center = canonical.location?.center;
+  if (center) {
+    // radiusKm is already a Number, so 1.0 and 2.50 render as "1" and "2.5".
+    const suffix = i18n.labels.radiusSuffix(String(center.radiusKm));
+    return { location: `${canonical.location.label} · ${suffix}`, filters };
+  }
   const locationLabel = canonical.location?.label === PREVIEW_I18N.en.labels.allGermany
     ? i18n.labels.allGermany
     : (canonical.location?.label || i18n.labels.allGermany);
@@ -760,7 +843,12 @@ export function validateSearchUrl(webUrl, options = {}) {
   const i18n = previewLocale(locale);
   const parsed = parseSearchUrl(webUrl);
   if (parsed.error) {
-    return { ok: false, error: parsed.error, ...parsed, preview: { location: '', filters: [] }, mobileUrl: '' };
+    // Blocks carrying an errorCode render in the caller's locale; anything else
+    // keeps its raw message for the generic userErrors mapping downstream.
+    const localized = parsed.errorCode && i18n.labels[parsed.errorCode]
+      ? i18n.labels[parsed.errorCode]
+      : parsed.error;
+    return { ok: false, ...parsed, error: localized, preview: { location: '', filters: [] }, mobileUrl: '' };
   }
   const preview = previewFor(parsed.canonical, locale);
   const dangerous = parsed.unsupportedParams.filter(p => p.risk === 'dangerous');
