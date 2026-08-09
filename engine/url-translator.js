@@ -454,6 +454,32 @@ function formatRange(range) {
   return `${min}-${max}`;
 }
 
+// IS24 radius searches carry the circle in the query string as
+// geocoordinates=lat;lon;radiusKm. Returns null for anything malformed —
+// callers surface that through unsupportedParams rather than guessing a
+// location, because a wrong guess silently searches the wrong place.
+function parseGeoCoordinates(raw) {
+  const parts = String(raw ?? '').split(';').map(p => p.trim());
+  if (parts.length !== 3 || parts.some(p => p === '')) return null;
+  const [lat, lon, radiusKm] = parts.map(Number);
+  if (![lat, lon, radiusKm].every(Number.isFinite)) return null;
+  if (lat < -90 || lat > 90) return null;
+  if (lon < -180 || lon > 180) return null;
+  if (radiusKm <= 0) return null;
+  return { lat, lon, radiusKm };
+}
+
+// centerofsearchaddress is display-only: IS24 varies its separators between
+// URL shapes, so parse defensively. The value never reaches the mobile API,
+// so a wrong guess about the format is cosmetic, never functional.
+function formatCenterAddress(raw) {
+  return String(raw ?? '')
+    .split(/[;,]/)
+    .map(p => p.trim())
+    .filter(Boolean)
+    .join(', ');
+}
+
 function splitValues(value) {
   return String(value || '').split(',').map(v => v.trim()).filter(Boolean);
 }
@@ -557,6 +583,7 @@ export function parseSearchUrl(webUrl) {
         path: geocodeParts,
         geocode: geocodeParts.length ? `/${geocodeParts.join('/')}` : '',
         label: geocodeParts.length ? geocodeParts.filter(p => p !== 'de').map(titleizeSlug).join(' / ') : 'All Germany',
+        center: null,
       },
       construction: { newBuildingOnly: NEW_BUILD_TYPES.has(realEstatePathType) },
       price: seoPathParams?.price || { min: null, max: null, type: PRICE_TYPE_MAP[realEstatePathType] || 'calculatedtotalrent' },
@@ -574,6 +601,7 @@ export function parseSearchUrl(webUrl) {
     const unsupportedParams = [];
     const safeIgnoredParams = [];
     const seenKnownKeys = new Set();
+    let centerAddress = '';
 
     for (const [rawKey, value] of url.searchParams) {
       const key = rawKey.toLowerCase();
@@ -635,11 +663,32 @@ export function parseSearchUrl(webUrl) {
         const mapped = EQUIPMENT_MAP[key];
         if (mapped) canonical.equipment.push(mapped);
         seenKnownKeys.add(key);
+      } else if (key === 'geocoordinates') {
+        // The circle itself. Mutates canonical.searchType, not the local const —
+        // canonical was already built from it, so canonical holds the truth.
+        const center = parseGeoCoordinates(value);
+        if (center) {
+          canonical.location.center = center;
+          canonical.searchType = 'radius';
+        } else {
+          unsupportedParams.push({ key: rawKey, value, risk: 'dangerous' });
+        }
+        seenKnownKeys.add(key);
+      } else if (key === 'centerofsearchaddress') {
+        centerAddress = formatCenterAddress(value);
+        seenKnownKeys.add(key);
       } else if (isSafeIgnoredParam(rawKey)) {
         safeIgnoredParams.push({ key: rawKey, value });
       } else {
         unsupportedParams.push({ key: rawKey, value, risk: 'dangerous' });
       }
+    }
+
+    // A radius URL usually has no geocode path at all, which is what made the
+    // preview claim "All Germany" while actually dropping the location.
+    if (canonical.location.center) {
+      const { lat, lon } = canonical.location.center;
+      canonical.location.label = centerAddress || `${lat.toFixed(3)}, ${lon.toFixed(3)}`;
     }
 
     canonical.heatingTypes = [...new Set(canonical.heatingTypes)];
