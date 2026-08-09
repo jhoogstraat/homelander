@@ -703,8 +703,16 @@ export function parseSearchUrl(webUrl) {
 /** Build a mobile API list URL from a canonical search model. */
 export function buildMobileApiUrl(canonical, { page = 1, pageSize = 20, includeListControls = true } = {}) {
   const params = new URLSearchParams();
-  if (canonical.location?.geocode) params.set('geocodes', canonical.location.geocode);
-  params.set('searchType', canonical.searchType || 'region');
+  const center = canonical.location?.center;
+  if (center) {
+    // The API requires geocoordinates for a radius search and ignores geocodes
+    // when both are present — omit geocodes rather than rely on that precedence.
+    params.set('searchType', 'radius');
+    params.set('geocoordinates', `${center.lat};${center.lon};${center.radiusKm}`);
+  } else {
+    if (canonical.location?.geocode) params.set('geocodes', canonical.location.geocode);
+    params.set('searchType', canonical.searchType || 'region');
+  }
   params.set('realestatetype', canonical.realEstateType || 'apartmentrent');
   if (canonical.price?.type) params.set('pricetype', canonical.price.type);
 

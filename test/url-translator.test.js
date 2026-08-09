@@ -819,6 +819,36 @@ describe('parseSearchUrl — radius searches', () => {
   });
 });
 
+describe('buildMobileApiUrl — radius searches', () => {
+  it('sends geocoordinates and searchType=radius', () => {
+    const { fullUrl, error } = translateUrl(RADIUS_URL);
+    assert.equal(error, null);
+    const params = new URL(fullUrl).searchParams;
+    assert.equal(params.get('searchType'), 'radius');
+    assert.equal(params.get('geocoordinates'), '53.55073;9.93549;1');
+  });
+
+  it('omits geocodes so the requested circle is unambiguous', () => {
+    const { fullUrl } = translateUrl(RADIUS_URL);
+    assert.equal(new URL(fullUrl).searchParams.has('geocodes'), false);
+  });
+
+  it('never forwards centerofsearchaddress to the mobile API', () => {
+    const { fullUrl } = translateUrl(RADIUS_URL);
+    assert.equal(new URL(fullUrl).searchParams.has('centerofsearchaddress'), false);
+  });
+
+  it('leaves region searches untouched', () => {
+    const { fullUrl } = translateUrl(
+      'https://www.immobilienscout24.de/Suche/de/hamburg/hamburg/altona/wohnung-mieten'
+    );
+    const params = new URL(fullUrl).searchParams;
+    assert.equal(params.get('geocodes'), '/de/hamburg/hamburg/altona');
+    assert.equal(params.get('searchType'), 'region');
+    assert.equal(params.has('geocoordinates'), false);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // translateUrl — error cases
 // ---------------------------------------------------------------------------
