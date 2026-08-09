@@ -902,6 +902,35 @@ describe('validateSearchUrl — radius preview', () => {
   });
 });
 
+describe('non-radius searches are unaffected by radius support', () => {
+  // Exact expected query strings. If a future change reorders or drops a param
+  // for ordinary searches, these fail loudly instead of drifting silently.
+  const CASES = [
+    {
+      name: 'plain district rent',
+      url: 'https://www.immobilienscout24.de/Suche/de/hamburg/hamburg/altona/wohnung-mieten',
+      expected: 'geocodes=%2Fde%2Fhamburg%2Fhamburg%2Faltona&searchType=region'
+        + '&realestatetype=apartmentrent&pricetype=calculatedtotalrent'
+        + '&exclusioncriteria=swap_flat&sorting=-firstactivation&pagenumber=1&pagesize=20',
+    },
+    {
+      name: 'WG search',
+      url: 'https://www.immobilienscout24.de/Suche/de/bayern/muenchen/4er-wg',
+      expected: 'geocodes=%2Fde%2Fbayern%2Fmuenchen&searchType=region'
+        + '&realestatetype=apartmentrent&pricetype=calculatedtotalrent&fulltext=4er+wg'
+        + '&exclusioncriteria=swap_flat&sorting=-firstactivation&pagenumber=1&pagesize=20',
+    },
+  ];
+
+  for (const { name, url, expected } of CASES) {
+    it(`${name} produces an unchanged mobile API query`, () => {
+      const { fullUrl, error } = translateUrl(url);
+      assert.equal(error, null);
+      assert.equal(new URL(fullUrl).search.slice(1), expected);
+    });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // translateUrl — error cases
 // ---------------------------------------------------------------------------
@@ -1296,6 +1325,26 @@ describe('IS24 live conformance (opt-in)', { skip: process.env.IS24_LIVE_TESTS !
     assert.equal(loose.error, null);
     assert.equal(strict.error, null);
     assert.ok(strict.total <= loose.total, `expected ${strict.total} <= ${loose.total}`);
+  });
+
+  it('radius URL reaches the live mobile API', async () => {
+    const result = await getTotalResults(
+      'https://www.immobilienscout24.de/Suche/radius/wohnung-mieten'
+      + '?centerofsearchaddress=Hamburg;Altona&geocoordinates=53.55073;9.93549;1.0'
+    );
+    assert.equal(result.error, null);
+    assert.equal(typeof result.total, 'number');
+    assert.ok(result.validation.ok);
+    assert.equal(result.validation.unsupportedParams.length, 0);
+  });
+
+  it('a wider radius does not return fewer results from the same centre', async () => {
+    const base = 'https://www.immobilienscout24.de/Suche/radius/wohnung-mieten?geocoordinates=53.55073;9.93549;';
+    const small = await getTotalResults(`${base}1.0`);
+    const large = await getTotalResults(`${base}10.0`);
+    assert.equal(small.error, null);
+    assert.equal(large.error, null);
+    assert.ok(small.total <= large.total, `expected ${small.total} <= ${large.total}`);
   });
 
   it('returned listings obey numeric max-room constraint when attributes are available', async () => {
