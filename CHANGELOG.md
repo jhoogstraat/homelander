@@ -5,6 +5,7 @@ All notable changes to Homelander are documented here. Format follows [Keep a Ch
 ## [Unreleased]
 
 ### Added
+- IS24 radius searches (`/Suche/radius/…?geocoordinates=lat;lon;km`) are now supported — the circle is sent to the mobile API as `searchType=radius` + `geocoordinates`, and the preview shows its centre and radius (e.g. `Hamburg, Altona · 1 km Umkreis`)
 - Experimental Linux builds (x64 `.deb` + `.AppImage`), first published on the v1.5.1 release; Linux enabled in the release workflow matrix
 - Screenshots section in README (Search, History, Settings)
 - Installation section in README with platform table, macOS `xattr -cr`, Windows SmartScreen note
@@ -21,6 +22,11 @@ All notable changes to Homelander are documented here. Format follows [Keep a Ch
 - Captcha wall auto-pause: removed `consecutiveCaptchas` counter, 5-failure pause, auto-resume, `captcha_wall` IPC emission
 
 ### Fixed
+- Radius search URLs were rejected with "Nicht unterstützte Filter: centerofsearchaddress, geocoordinates" and, worse, previewed as "Deutschlandweit" — the location constraint was dropped entirely
+- Radius links missing their map coordinates are now blocked with an actionable message instead of building a request the mobile API answers with 412
+- Map-drawn (shape) search links are blocked up front rather than silently failing at request time
+- Search names derived from a radius URL read "Radius · wohnung zur Miete"; they now use the search centre
+- Errors in the Add Search dialog always rendered in English because `t` was not passed to `userErrorText`, even though the German strings existed
 - `{{name}}` template resolution now consistent between Settings preview, Setup wizard preview, and actual daemon messages
 
 ## [1.3.3] - 2026-06-25
