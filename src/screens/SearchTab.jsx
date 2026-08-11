@@ -152,14 +152,14 @@ export default function SearchTab() {
       ]);
       if (!statsErr && fresh) {
         setStats(normalizeStats(fresh));
-        for (const f of (freshFilters || filters)) clearPollError(f.id);
+        for (const f of (freshFilters || [])) clearPollError(f.id);
       }
       if (!filtErr && freshFilters) setFilters(freshFilters);
     }
     refresh();
     const interval = setInterval(refresh, 30000);
     return () => clearInterval(interval);
-  }, [setStats, setFilters, filters, clearPollError]);
+  }, [setStats, setFilters, clearPollError]);
 
   // ── Filter actions ─────────────────────────────────────────────
   const handleAddFilter = useCallback(async (webUrl, name) => {
