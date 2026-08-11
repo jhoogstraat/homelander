@@ -22,6 +22,7 @@ All notable changes to Homelander are documented here. Format follows [Keep a Ch
 - Captcha wall auto-pause: removed `consecutiveCaptchas` counter, 5-failure pause, auto-resume, `captcha_wall` IPC emission
 
 ### Fixed
+- The Suchen tab re-read its searches in a tight loop instead of every 30 seconds: the refresh effect depended on the `filters` array it replaced, and every IPC read returns a fresh array, so each update retriggered the effect immediately — burning CPU on back-to-back SQLite reads and renderer re-renders (thanks @jhoogstraat)
 - Radius search URLs were rejected with "Nicht unterstützte Filter: centerofsearchaddress, geocoordinates" and, worse, previewed as "Deutschlandweit" — the location constraint was dropped entirely
 - Radius links missing their map coordinates are now blocked with an actionable message instead of building a request the mobile API answers with 412
 - Map-drawn (shape) search links are blocked up front rather than silently failing at request time
