@@ -209,6 +209,12 @@ Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and 
 - Feature ideas → [Feature request](https://github.com/B1Z0N/homelander/issues/new?template=feature_request.yml)
 - Questions → [Discussions](https://github.com/B1Z0N/homelander/discussions)
 
+### External contributors
+
+Thanks to everyone who helped outside of the core development:
+
+- **Thorsten Buck** — testing the app on Ubuntu
+
 ## ❤️ Support
 
 If Homelander saves you time and stress, consider supporting development:
