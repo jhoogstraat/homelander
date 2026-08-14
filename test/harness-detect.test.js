@@ -117,7 +117,7 @@ describe('detectHarnesses', () => {
     const claude = detectHarnesses(deps).find((h) => h.id === 'claude-code');
     assert.equal(claude.detected, true);
     assert.equal(claude.command, 'npx');
-    assert.deepEqual(claude.args, ['-y', '@zed-industries/claude-code-acp']);
+    assert.deepEqual(claude.args, ['-y', '@agentclientprotocol/claude-code-acp']);
     assert.equal(claude.via, 'npx');
     assert.equal(claude.binPath, '/usr/bin/claude');
   });

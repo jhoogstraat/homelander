@@ -34,7 +34,7 @@ export const HARNESS_CATALOG = [
     label: 'Claude Code',
     candidates: [
       { bin: 'claude-code-acp', command: 'claude-code-acp', args: [], via: 'direct' },
-      { bin: 'claude', command: 'npx', args: ['-y', '@zed-industries/claude-code-acp'], via: 'npx', requires: 'npx' },
+      { bin: 'claude', command: 'npx', args: ['-y', '@agentclientprotocol/claude-agent-acp'], via: 'npx', requires: 'npx' },
     ],
     // Only filled in where the model ids are unambiguous — for the others the
     // user's existing values stand and the harness default applies if blank.
@@ -45,7 +45,7 @@ export const HARNESS_CATALOG = [
     label: 'Codex',
     candidates: [
       { bin: 'codex-acp', command: 'codex-acp', args: [], via: 'direct' },
-      { bin: 'codex', command: 'npx', args: ['-y', '@zed-industries/codex-acp'], via: 'npx', requires: 'npx' },
+      { bin: 'codex', command: 'npx', args: ['-y', '@agentclientprotocol/codex-acp'], via: 'npx', requires: 'npx' },
     ],
     models: {},
   },

@@ -49,7 +49,7 @@
       "harnessNone": "Keine Agent-CLI gefunden. Installiere Claude Code, Codex oder Gemini CLI — oder gib selbst einen Befehl ein.",
       "command": "Befehl",
       "args": "Argumente",
-      "argsPlaceholder": "-y @zed-industries/claude-code-acp",
+      "argsPlaceholder": "-y @agentclientprotocol/claude-code-acp",
       "acpDesc": "Homelander startet dieses Agent-Harness und kommuniziert über das Agent Client Protocol. Es nutzt dessen eigenen Login — hier wird kein API-Key gespeichert.",
       "baseUrl": "Basis-URL",
       "apiKey": "API-Key",

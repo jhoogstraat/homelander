@@ -141,7 +141,7 @@ Runtime config at `~/.homelander/config.json` — read/written by Electron main 
   "message_template": "... {{title}} {{address}} {{name}} ...",
   "ai": { "enabled": false, "provider": "acp", "model": "claude-opus-5",
           "fallback_model": "claude-sonnet-5", "timeout_seconds": 90, "prompt": "",
-          "command": "npx", "args": ["-y", "@zed-industries/claude-code-acp"],
+          "command": "npx", "args": ["-y", "@agentclientprotocol/claude-agent-acp"],
           "cwd": "", "env": {}, "auth_method_id": "",
           "base_url": "", "api_key": "", "headers": {}, "max_tokens": 1024 },
   "timing": { "speed": "balanced", "overrides": {} },

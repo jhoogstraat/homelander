@@ -483,7 +483,7 @@ function getDefaultConfig() {
       prompt: '',               // blank = built-in layout instructions
       // provider: acp
       command: 'npx',
-      args: ['-y', '@zed-industries/claude-code-acp'],
+      args: ['-y', '@agentclientprotocol/claude-agent-acp'],
       cwd: '',
       env: {},
       auth_method_id: '',
