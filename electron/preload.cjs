@@ -54,9 +54,9 @@ contextBridge.exposeInMainWorld('homelander', {
   validateCaptchaKey: (key) => ipcRenderer.invoke('captcha:validate', key),
 
   // ── AI message composition ────────────────────────────────
-  testAiMessage: (aiConfig) => ipcRenderer.invoke('ai:test', aiConfig),
+  testAiMessage: (payload) => ipcRenderer.invoke('ai:test', payload),
   detectAiHarnesses: () => ipcRenderer.invoke('ai:detect-harnesses'),
-  listAiModels: (aiConfig) => ipcRenderer.invoke('ai:list-models', aiConfig),
+  probeAiHarness: (payload) => ipcRenderer.invoke('ai:probe-harness', payload),
 
   // ── Events (main → renderer) ──────────────────────────────
   onEvent: (callback) => {

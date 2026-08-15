@@ -12,15 +12,22 @@
 //   5. session/set_config_option → only if the agent offers a model selector
 //   6. session/prompt → agent streams session/update notifications, then resolves
 //
-// Model selection goes through ACP's *session config options*, not a dedicated
-// model method. An agent MAY return a `configOptions` array from session/new;
-// an entry with `category: "model"` is a model selector carrying `options`
-// (each `{value, name, description}`) and `currentValue`. Clients switch model
-// with `session/set_config_option`, which returns the full updated list.
+// Model and reasoning-level selection both go through ACP's *session config
+// options*, not dedicated methods. An agent MAY return a `configOptions` array
+// from session/new; each entry carries `options` (`{value, name, description}`)
+// and `currentValue`, and a `category` giving its meaning. The two we use:
 //
-// All of this is optional in the spec — plenty of agents return only a
-// sessionId. When there is no model selector, we fall back to selecting the
-// model at spawn time via {{model}} substitution in the harness args/env.
+//   category: "model"         → which model to run
+//   category: "thought_level" → reasoning/thinking depth
+//
+// Clients change one with `session/set_config_option`, which returns the full
+// updated list. Categories are UX metadata and an open set: the spec says
+// clients MUST handle missing/unknown categories gracefully, so we also fall
+// back to matching the option id when a category is absent.
+//
+// All of this is optional — plenty of agents return only a sessionId. When
+// there is no model selector, we fall back to selecting the model at spawn
+// time via {{model}} substitution in the harness args/env.
 //
 // We declare *no* client capabilities (no fs, no terminal): the composer only
 // needs one text turn, so every filesystem/terminal request from the agent is
@@ -43,6 +50,30 @@ class AcpError extends Error {
     this.code = code;
     this.data = data;
   }
+}
+
+/**
+ * How we recognise the two config options we care about. `category` is the
+ * spec-reserved signal; the id patterns are a fallback for agents that omit it.
+ */
+export const CONFIG_KINDS = {
+  model: { category: 'model', idPattern: /^model$/i },
+  thoughtLevel: { category: 'thought_level', idPattern: /think|thought|reason|effort/i },
+};
+
+/** v1 keys a config option `id`, v2 keys it `configId` — accept either. */
+function optionId(option) {
+  return option?.configId || option?.id || null;
+}
+
+/** Find the model / thought-level selector in a configOptions array. */
+export function findConfigOption(configOptions, kind) {
+  const options = Array.isArray(configOptions) ? configOptions : [];
+  return (
+    options.find((o) => o?.category === kind.category) ||
+    options.find((o) => !o?.category && kind.idPattern.test(optionId(o) || '')) ||
+    null
+  );
 }
 
 /** Agents signal "you must authenticate first" with this error code. */
@@ -81,6 +112,7 @@ export class AcpClient {
    * @param {string} [opts.cwd]          Working dir for session/new (absolute)
    * @param {object} [opts.env]          Extra env vars; values get '{{model}}'
    * @param {string} [opts.model]        Model id to request
+   * @param {string} [opts.thoughtLevel] Reasoning-level option value to request
    * @param {string} [opts.authMethodId] Auth method to use if challenged
    * @param {number} [opts.timeoutMs]    Per-request timeout
    * @param {Function} [opts.log]        Logger
@@ -92,6 +124,7 @@ export class AcpClient {
     cwd = process.cwd(),
     env = {},
     model = '',
+    thoughtLevel = '',
     authMethodId = '',
     timeoutMs = 60000,
     log = () => {},
@@ -102,6 +135,7 @@ export class AcpClient {
     this.cwd = cwd;
     this.env = env;
     this.model = model;
+    this.thoughtLevel = thoughtLevel;
     this.authMethodId = authMethodId;
     this.timeoutMs = timeoutMs;
     this.log = log;
@@ -113,10 +147,8 @@ export class AcpClient {
     this.authMethods = [];
     this.protocolVersion = ACP_PROTOCOL_VERSION;
     this.modelSelection = 'none'; // none | session | spawn
-    /** @type {Array<{value: string, name: string, description?: string}>} */
-    this.modelOptions = [];       // empty when the agent offers no model selector
-    this.currentModelId = null;
-    this.modelConfigId = null;
+    /** Raw configOptions from the last session/new or set_config_option. */
+    this.configOptions = [];
     this._nextId = 1;
     this._pending = new Map();
     this._stdoutBuffer = '';
@@ -293,7 +325,7 @@ export class AcpClient {
     this.sessionId = session?.sessionId;
     if (!this.sessionId) throw new AcpError('agent returned no sessionId');
 
-    await this._applyModel(session);
+    await this._applySessionConfig(session);
     return { sessionId: this.sessionId, modelSelection: this.modelSelection };
   }
 
@@ -311,78 +343,85 @@ export class AcpClient {
     const session = await this._newSession();
     if (!session?.sessionId) throw new AcpError('agent returned no sessionId');
     this.sessionId = session.sessionId;
-    await this._applyModel(session);
+    await this._applySessionConfig(session);
     return this.sessionId;
   }
 
-  /**
-   * Read the model selector out of a configOptions array, if the agent sent one.
-   * v1 keys the option `id`, v2 keys it `configId` — accept either.
-   */
-  _readModelConfig(configOptions) {
-    const options = Array.isArray(configOptions) ? configOptions : [];
-    const selector = options.find((o) => o?.category === 'model');
-    if (!selector) {
-      this.modelOptions = [];
-      this.currentModelId = null;
-      this.modelConfigId = null;
-      return null;
-    }
-    this.modelConfigId = selector.configId || selector.id || 'model';
-    this.modelOptions = (Array.isArray(selector.options) ? selector.options : []).map((o) => ({
-      value: o?.value,
-      name: o?.name || o?.value,
-      description: o?.description || '',
-    })).filter((o) => o.value);
-    this.currentModelId = selector.currentValue ?? null;
-    return selector;
+  /** Normalised choices for one config-option kind, or [] if not offered. */
+  optionsFor(kind) {
+    const selector = findConfigOption(this.configOptions, kind);
+    return (Array.isArray(selector?.options) ? selector.options : [])
+      .map((o) => ({ value: o?.value, name: o?.name || o?.value, description: o?.description || '' }))
+      .filter((o) => o.value);
+  }
+
+  /** Whatever the agent currently has selected for one kind. */
+  currentValueFor(kind) {
+    const selector = findConfigOption(this.configOptions, kind);
+    return selector?.currentValue ?? null;
+  }
+
+  /** Models this agent advertises. Empty is normal, not an error. */
+  availableModels() {
+    return this.optionsFor(CONFIG_KINDS.model);
+  }
+
+  /** Reasoning levels this agent advertises. Empty is normal, not an error. */
+  availableThoughtLevels() {
+    return this.optionsFor(CONFIG_KINDS.thoughtLevel);
   }
 
   /**
-   * Two ways to pick a model, in preference order:
-   *   1. session/set_config_option — when the agent offers a model selector
-   *      that lists the requested model
-   *   2. spawn-time — the '{{model}}' substitution already applied to args/env
+   * Set one config option by value.
+   * @returns {Promise<boolean>} true if the agent accepted the change
    */
-  async _applyModel(session) {
-    this._readModelConfig(session?.configOptions);
+  async _setConfigOption(kind, value) {
+    if (!value) return false;
+    const selector = findConfigOption(this.configOptions, kind);
+    const configId = optionId(selector);
+    if (!configId) return false;
+    // Only offer values the agent actually lists.
+    if (!this.optionsFor(kind).some((o) => o.value === value)) return false;
+    if (selector.currentValue === value) return true; // already there
 
-    if (!this.model) {
-      this.modelSelection = 'none';
-      return;
-    }
-    if (!this.modelConfigId || !this.modelOptions.some((o) => o.value === this.model)) {
-      this.modelSelection = 'spawn';
-      return;
-    }
-    if (this.currentModelId === this.model) {
-      this.modelSelection = 'session'; // already on it, nothing to switch
-      return;
-    }
-
-    const params = { sessionId: this.sessionId, configId: this.modelConfigId, value: this.model };
+    const params = { sessionId: this.sessionId, configId, value };
     // v2 tags the value kind; v1 has no such field.
     if (this.protocolVersion >= 2) params.type = 'id';
 
     try {
       const result = await this._request('session/set_config_option', params);
       // The agent replies with the full updated option list.
-      this._readModelConfig(result?.configOptions);
-      this.modelSelection = 'session';
+      if (Array.isArray(result?.configOptions)) this.configOptions = result.configOptions;
+      return true;
     } catch (err) {
-      // The agent listed the model but refused to switch — the spawn-time
-      // selection (if any) still stands, so this is not fatal.
-      this.log(`ACP: session/set_config_option failed (${err.message}); relying on spawn-time model`);
-      this.modelSelection = 'spawn';
+      this.log(`ACP: could not set ${configId}=${value} (${err.message})`);
+      return false;
     }
   }
 
   /**
-   * Models this agent advertises for the current session.
-   * Empty when the agent offers no model selector — that is normal, not an error.
+   * Apply the requested model and reasoning level to a fresh session.
+   *
+   * Model has two selection paths, in preference order:
+   *   1. session/set_config_option — when the agent offers a model selector
+   *      that lists the requested model
+   *   2. spawn-time — the '{{model}}' substitution already applied to args/env
    */
-  availableModels() {
-    return this.modelOptions.map((o) => ({ ...o }));
+  async _applySessionConfig(session) {
+    this.configOptions = Array.isArray(session?.configOptions) ? session.configOptions : [];
+
+    if (!this.model) {
+      this.modelSelection = 'none';
+    } else {
+      const applied = await this._setConfigOption(CONFIG_KINDS.model, this.model);
+      // Not offered, or refused — the spawn-time selection (if any) stands.
+      this.modelSelection = applied ? 'session' : 'spawn';
+    }
+
+    if (this.thoughtLevel) {
+      const applied = await this._setConfigOption(CONFIG_KINDS.thoughtLevel, this.thoughtLevel);
+      if (!applied) this.log(`ACP: harness did not accept thought level '${this.thoughtLevel}'`);
+    }
   }
 
   // ── Prompting ───────────────────────────────────────────────

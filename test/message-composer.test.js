@@ -7,7 +7,10 @@ import {
   MessageComposer,
   buildPrompt,
   sanitizeDraft,
-  modelChain,
+  attemptChain,
+  attemptLabel,
+  detectListingLanguage,
+  languageInstruction,
   renderTemplate,
   DEFAULT_AI_PROMPT,
 } from '../engine/message-composer.js';
@@ -26,9 +29,9 @@ const TEMPLATE = 'Hallo,\nich interessiere mich für {{title}} in {{address}}.\n
 function stubProvider(replies) {
   const calls = [];
   let disposed = 0;
-  const makeProvider = ({ model }) => ({
+  const makeProvider = ({ attempt }) => ({
     async draft(prompt) {
-      calls.push({ model, prompt });
+      calls.push({ attempt, prompt });
       const next = replies.shift();
       if (next instanceof Error) throw next;
       if (next === undefined) throw new Error('no reply queued');
@@ -108,18 +111,92 @@ describe('sanitizeDraft', () => {
   });
 });
 
-describe('modelChain', () => {
-  it('tries the primary then the fallback', () => {
-    assert.deepEqual(modelChain({ model: 'a', fallback_model: 'b' }), ['a', 'b']);
+describe('attemptChain', () => {
+  const acp = (primary, fallback) => ({ provider: 'acp', primary, fallback });
+
+  it('tries primary then fallback', () => {
+    const chain = attemptChain(acp(
+      { harness_id: 'claude-code', command: 'claude-code-acp', model: 'opus', thought_level: 'high' },
+      { harness_id: 'codex', command: 'codex-acp', model: 'gpt' },
+    ));
+    assert.deepEqual(chain.map((a) => a.slot), ['primary', 'fallback']);
+    assert.equal(chain[0].thought_level, 'high');
+    assert.equal(chain[1].harness_id, 'codex');
   });
 
-  it('de-duplicates and drops blanks', () => {
-    assert.deepEqual(modelChain({ model: 'a', fallback_model: 'a' }), ['a']);
-    assert.deepEqual(modelChain({ model: 'a', fallback_model: '' }), ['a']);
+  it('lets each slot use a different harness', () => {
+    const chain = attemptChain(acp(
+      { command: 'claude-code-acp', model: 'opus' },
+      { command: 'codex-acp', model: 'gpt' },
+    ));
+    assert.deepEqual(chain.map((a) => a.command), ['claude-code-acp', 'codex-acp']);
   });
 
-  it('falls back to the provider default when no model is set', () => {
-    assert.deepEqual(modelChain({}), ['']);
+  it('skips a slot with no harness configured', () => {
+    const chain = attemptChain(acp({ command: 'claude-code-acp' }, { command: '' }));
+    assert.deepEqual(chain.map((a) => a.slot), ['primary']);
+  });
+
+  it('returns nothing when nothing is configured', () => {
+    assert.deepEqual(attemptChain(acp({}, {})), []);
+    assert.deepEqual(attemptChain({}), []);
+  });
+
+  it('drops a fallback identical to the primary', () => {
+    const slot = { command: 'claude-code-acp', model: 'opus', thought_level: 'high' };
+    assert.equal(attemptChain(acp({ ...slot }, { ...slot })).length, 1);
+  });
+
+  it('keeps a fallback that differs only by model or reasoning level', () => {
+    assert.equal(attemptChain(acp(
+      { command: 'x', model: 'opus' },
+      { command: 'x', model: 'sonnet' },
+    )).length, 2);
+    assert.equal(attemptChain(acp(
+      { command: 'x', model: 'opus', thought_level: 'high' },
+      { command: 'x', model: 'opus', thought_level: 'low' },
+    )).length, 2);
+  });
+
+  it('splits args given as a string', () => {
+    const [attempt] = attemptChain(acp({ command: 'npx', args: '-y  pkg' }, {}));
+    assert.deepEqual(attempt.args, ['-y', 'pkg']);
+  });
+
+  it('judges an HTTP provider slot by model, not command', () => {
+    const chain = attemptChain({ provider: 'openai-compatible', primary: { model: 'gpt-x' }, fallback: {} });
+    assert.deepEqual(chain.map((a) => a.model), ['gpt-x']);
+  });
+
+  it('labels an attempt by harness, model, and level', () => {
+    assert.equal(attemptLabel({ harness_id: 'codex', model: 'gpt', thought_level: 'high' }), 'codex / gpt / high');
+    assert.equal(attemptLabel({ command: 'my-agent' }), 'my-agent');
+  });
+});
+
+describe('detectListingLanguage', () => {
+  it('detects German listings', () => {
+    assert.equal(detectListingLanguage({ title: 'Schöne 3-Zimmer-Wohnung mit Balkon', address: 'Musterstraße 42' }), 'de');
+    assert.equal(detectListingLanguage({ title: 'Helle Wohnung, provisionsfrei', description: 'Die Küche ist neu.' }), 'de');
+  });
+
+  it('detects English listings', () => {
+    assert.equal(detectListingLanguage({ title: 'Bright furnished apartment with balcony', description: 'Spacious bedroom, rent includes utilities.' }), 'en');
+  });
+
+  it('defaults to German when there is nothing to go on', () => {
+    assert.equal(detectListingLanguage({}), 'de');
+    assert.equal(detectListingLanguage({ title: '   ' }), 'de');
+    assert.equal(detectListingLanguage({ title: 'Hauptstr. 5' }), 'de');
+  });
+
+  it('treats umlauts as a German signal even in a mixed title', () => {
+    assert.equal(detectListingLanguage({ title: 'Apartment mit Küche und Wohnfläche' }), 'de');
+  });
+
+  it('produces an instruction in the matching language', () => {
+    assert.match(languageInstruction('en'), /in English/);
+    assert.match(languageInstruction('de'), /auf Deutsch/);
   });
 });
 
@@ -127,12 +204,17 @@ describe('MessageComposer', () => {
   const baseConfig = (ai) => ({
     message_template: TEMPLATE,
     persona: LISTING._contact,
-    ai: { provider: 'acp', command: 'fake', ...ai },
+    ai: { provider: 'acp', ...ai },
   });
+  const slot = (over = {}) => ({ command: 'fake', ...over });
+  const DRAFT = 'Sehr geehrte Damen und Herren, die Wohnung in Berlin passt perfekt zu uns.';
 
   it('uses the template when AI is disabled and never spawns a provider', async () => {
     const stub = stubProvider([]);
-    const composer = new MessageComposer({ config: baseConfig({ enabled: false }), makeProvider: stub.makeProvider });
+    const composer = new MessageComposer({
+      config: baseConfig({ enabled: false, primary: slot() }),
+      makeProvider: stub.makeProvider,
+    });
 
     const result = await composer.compose(LISTING);
     assert.equal(result.source, 'template');
@@ -140,42 +222,66 @@ describe('MessageComposer', () => {
     assert.equal(stub.calls.length, 0);
   });
 
-  it('uses the AI draft when the primary model succeeds', async () => {
-    const draft = 'Sehr geehrte Damen und Herren, die Wohnung in Berlin passt perfekt zu uns.';
-    const stub = stubProvider([draft]);
+  it('uses the template when AI is enabled but nothing is configured', async () => {
+    const stub = stubProvider([]);
     const composer = new MessageComposer({
-      config: baseConfig({ enabled: true, model: 'opus', fallback_model: 'sonnet' }),
+      config: baseConfig({ enabled: true, primary: {}, fallback: {} }),
+      makeProvider: stub.makeProvider,
+    });
+
+    const result = await composer.compose(LISTING);
+    assert.equal(result.source, 'template');
+    assert.equal(stub.calls.length, 0);
+    assert.match(result.errors[0], /no attempt configured/);
+  });
+
+  it('uses the AI draft when the primary attempt succeeds', async () => {
+    const stub = stubProvider([DRAFT]);
+    const composer = new MessageComposer({
+      config: baseConfig({
+        enabled: true,
+        primary: slot({ harness_id: 'claude-code', model: 'opus', thought_level: 'high' }),
+        fallback: slot({ harness_id: 'codex', model: 'gpt' }),
+      }),
       makeProvider: stub.makeProvider,
     });
 
     const result = await composer.compose(LISTING);
     assert.equal(result.source, 'ai');
-    assert.equal(result.text, draft);
-    assert.equal(result.model, 'opus');
+    assert.equal(result.text, DRAFT);
+    assert.equal(result.slot, 'primary');
+    assert.equal(result.attempt, 'claude-code / opus / high');
     assert.equal(stub.calls.length, 1);
-    assert.equal(stub.calls[0].model, 'opus');
+    assert.equal(stub.calls[0].attempt.thought_level, 'high');
   });
 
-  it('falls back to the fallback model, then reports which model served', async () => {
-    const draft = 'Sehr geehrte Damen und Herren, wir bewerben uns hiermit auf Ihre Wohnung.';
-    const stub = stubProvider([new Error('harness exited'), draft]);
+  it('falls back to the second attempt, which may be a different harness', async () => {
+    const stub = stubProvider([new Error('harness exited'), DRAFT]);
     const composer = new MessageComposer({
-      config: baseConfig({ enabled: true, model: 'opus', fallback_model: 'sonnet' }),
+      config: baseConfig({
+        enabled: true,
+        primary: slot({ harness_id: 'claude-code', command: 'claude-code-acp', model: 'opus' }),
+        fallback: slot({ harness_id: 'codex', command: 'codex-acp', model: 'gpt' }),
+      }),
       makeProvider: stub.makeProvider,
     });
 
     const result = await composer.compose(LISTING);
     assert.equal(result.source, 'ai');
-    assert.equal(result.model, 'sonnet');
-    assert.deepEqual(stub.calls.map((c) => c.model), ['opus', 'sonnet']);
+    assert.equal(result.slot, 'fallback');
+    assert.deepEqual(stub.calls.map((c) => c.attempt.command), ['claude-code-acp', 'codex-acp']);
     assert.equal(result.errors.length, 1);
-    assert.match(result.errors[0], /opus: harness exited/);
+    assert.match(result.errors[0], /claude-code \/ opus: harness exited/);
   });
 
-  it('falls back to the template when every model fails', async () => {
+  it('falls back to the template when every attempt fails', async () => {
     const stub = stubProvider([new Error('boom'), new Error('also boom')]);
     const composer = new MessageComposer({
-      config: baseConfig({ enabled: true, model: 'opus', fallback_model: 'sonnet' }),
+      config: baseConfig({
+        enabled: true,
+        primary: slot({ model: 'opus' }),
+        fallback: slot({ model: 'sonnet' }),
+      }),
       makeProvider: stub.makeProvider,
     });
 
@@ -188,7 +294,11 @@ describe('MessageComposer', () => {
   it('falls back to the template when the AI returns an unusable draft', async () => {
     const stub = stubProvider(['ok', 'ok']); // too short to be a message
     const composer = new MessageComposer({
-      config: baseConfig({ enabled: true, model: 'opus', fallback_model: 'sonnet' }),
+      config: baseConfig({
+        enabled: true,
+        primary: slot({ model: 'opus' }),
+        fallback: slot({ model: 'sonnet' }),
+      }),
       makeProvider: stub.makeProvider,
     });
 
@@ -197,10 +307,10 @@ describe('MessageComposer', () => {
     assert.match(result.errors[0], /too short/);
   });
 
-  it('discards a provider that failed so the next attempt starts clean', async () => {
+  it('discards a provider that failed so the next listing starts clean', async () => {
     const stub = stubProvider([new Error('boom'), new Error('boom')]);
     const composer = new MessageComposer({
-      config: baseConfig({ enabled: true, model: 'opus' }),
+      config: baseConfig({ enabled: true, primary: slot({ model: 'opus' }) }),
       makeProvider: stub.makeProvider,
     });
 
@@ -211,10 +321,9 @@ describe('MessageComposer', () => {
   });
 
   it('reuses a healthy provider across listings', async () => {
-    const draft = 'Sehr geehrte Damen und Herren, ich möchte mich auf Ihre Wohnung bewerben.';
-    const stub = stubProvider([draft, draft]);
+    const stub = stubProvider([DRAFT, DRAFT]);
     const composer = new MessageComposer({
-      config: baseConfig({ enabled: true, model: 'opus' }),
+      config: baseConfig({ enabled: true, primary: slot({ model: 'opus' }) }),
       makeProvider: stub.makeProvider,
     });
 
@@ -224,31 +333,48 @@ describe('MessageComposer', () => {
   });
 
   it('drops live providers on config hot-reload', async () => {
-    const draft = 'Sehr geehrte Damen und Herren, ich möchte mich auf Ihre Wohnung bewerben.';
-    const stub = stubProvider([draft]);
+    const stub = stubProvider([DRAFT]);
     const composer = new MessageComposer({
-      config: baseConfig({ enabled: true, model: 'opus' }),
+      config: baseConfig({ enabled: true, primary: slot({ model: 'opus' }) }),
       makeProvider: stub.makeProvider,
     });
 
     await composer.compose(LISTING);
-    composer.updateConfig(baseConfig({ enabled: true, model: 'sonnet' }));
+    composer.updateConfig(baseConfig({ enabled: true, primary: slot({ model: 'sonnet' }) }));
     assert.equal(stub.disposedCount(), 1);
   });
 
-  it('passes the current template and persona into the prompt', async () => {
-    const draft = 'Sehr geehrte Damen und Herren, ich möchte mich auf Ihre Wohnung bewerben.';
-    const stub = stubProvider([draft]);
+  it('passes the current template, persona, and language into the prompt', async () => {
+    const stub = stubProvider([DRAFT]);
     const composer = new MessageComposer({
-      config: baseConfig({ enabled: true, model: 'opus', prompt: 'CUSTOM' }),
+      config: baseConfig({ enabled: true, primary: slot({ model: 'opus' }), prompt: 'CUSTOM' }),
       makeProvider: stub.makeProvider,
     });
 
     await composer.compose(LISTING);
     const { prompt } = stub.calls[0];
     assert.match(prompt, /^CUSTOM/);
+    assert.match(prompt, /auf Deutsch/);
     assert.match(prompt, /Vorname: Max/);
     assert.match(prompt, /Schöne 3-Zimmer-Wohnung/);
+  });
+
+  it('asks for English when the listing is English', async () => {
+    const stub = stubProvider([DRAFT]);
+    const composer = new MessageComposer({
+      config: baseConfig({ enabled: true, primary: slot({ model: 'opus' }) }),
+      makeProvider: stub.makeProvider,
+    });
+
+    const english = { title: 'Bright furnished apartment', description: 'Spacious bedroom, rent includes utilities.' };
+    const result = await composer.compose(english);
+    assert.equal(result.language, 'en');
+    assert.match(stub.calls[0].prompt, /in English/);
+  });
+
+  it('reports the listing language even on the template path', async () => {
+    const composer = new MessageComposer({ config: baseConfig({ enabled: false }) });
+    assert.equal((await composer.compose(LISTING)).language, 'de');
   });
 });
 
@@ -258,11 +384,11 @@ describe('ai-providers', () => {
   });
 
   it('rejects an unknown provider id', () => {
-    assert.throws(() => createProvider({ ai: { provider: 'nope' } }), /unknown AI provider/);
+    assert.throws(() => createProvider({ ai: { provider: 'nope' }, attempt: {} }), /unknown AI provider/);
   });
 
   it('defaults to acp', () => {
-    const provider = createProvider({ ai: {}, model: 'x' });
+    const provider = createProvider({ ai: {}, attempt: { model: 'x' } });
     assert.equal(provider.constructor.name, 'AcpProvider');
   });
 
@@ -278,7 +404,7 @@ describe('ai-providers', () => {
           json: async () => ({ choices: [{ message: { content: '  Guten Tag  ' }, finish_reason: 'stop' }] }),
         };
       };
-      const provider = createProvider({ ai, model: 'gpt-x', fetchImpl });
+      const provider = createProvider({ ai, attempt: { model: 'gpt-x' }, fetchImpl });
       const text = await provider.draft('PROMPT');
 
       assert.equal(text, 'Guten Tag');
@@ -289,20 +415,33 @@ describe('ai-providers', () => {
       assert.deepEqual(body.messages, [{ role: 'user', content: 'PROMPT' }]);
     });
 
+    it('passes the reasoning level through as reasoning_effort', async () => {
+      let seen = null;
+      const fetchImpl = async (_url, init) => {
+        seen = JSON.parse(init.body);
+        return { ok: true, json: async () => ({ choices: [{ message: { content: 'hallo' } }] }) };
+      };
+      await createProvider({ ai, attempt: { model: 'gpt-x', thought_level: 'high' }, fetchImpl }).draft('x');
+      assert.equal(seen.reasoning_effort, 'high');
+
+      await createProvider({ ai, attempt: { model: 'gpt-x' }, fetchImpl }).draft('x');
+      assert.equal(seen.reasoning_effort, undefined);
+    });
+
     it('omits the auth header when no key is set (local models)', async () => {
       let seen = null;
       const fetchImpl = async (url, init) => {
         seen = init;
         return { ok: true, json: async () => ({ choices: [{ message: { content: 'hallo' } }] }) };
       };
-      const provider = createProvider({ ai: { ...ai, api_key: '' }, model: 'llama', fetchImpl });
+      const provider = createProvider({ ai: { ...ai, api_key: '' }, attempt: { model: 'llama' }, fetchImpl });
       await provider.draft('x');
       assert.equal(seen.headers.authorization, undefined);
     });
 
     it('surfaces HTTP errors', async () => {
       const fetchImpl = async () => ({ ok: false, status: 429, text: async () => 'rate limited' });
-      const provider = createProvider({ ai, model: 'gpt-x', fetchImpl });
+      const provider = createProvider({ ai, attempt: { model: 'gpt-x' }, fetchImpl });
       await assert.rejects(() => provider.draft('x'), /HTTP 429.*rate limited/);
     });
 
@@ -311,17 +450,17 @@ describe('ai-providers', () => {
         ok: true,
         json: async () => ({ choices: [{ message: { content: '' }, finish_reason: 'content_filter' }] }),
       });
-      const provider = createProvider({ ai, model: 'gpt-x', fetchImpl });
+      const provider = createProvider({ ai, attempt: { model: 'gpt-x' }, fetchImpl });
       await assert.rejects(() => provider.draft('x'), /content filter/);
     });
 
     it('requires a base_url and a model', async () => {
       await assert.rejects(
-        () => createProvider({ ai: { provider: 'openai-compatible' }, model: 'm', fetchImpl: async () => {} }).draft('x'),
+        () => createProvider({ ai: { provider: 'openai-compatible' }, attempt: { model: 'm' }, fetchImpl: async () => {} }).draft('x'),
         /base_url/
       );
       await assert.rejects(
-        () => createProvider({ ai, model: '', fetchImpl: async () => {} }).draft('x'),
+        () => createProvider({ ai, attempt: { model: '' }, fetchImpl: async () => {} }).draft('x'),
         /no model/
       );
     });

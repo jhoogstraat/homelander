@@ -36,9 +36,6 @@ export const HARNESS_CATALOG = [
       { bin: 'claude-code-acp', command: 'claude-code-acp', args: [], via: 'direct' },
       { bin: 'claude', command: 'npx', args: ['-y', '@agentclientprotocol/claude-agent-acp'], via: 'npx', requires: 'npx' },
     ],
-    // Only filled in where the model ids are unambiguous — for the others the
-    // user's existing values stand and the harness default applies if blank.
-    models: { model: 'claude-opus-5', fallback_model: 'claude-sonnet-5' },
   },
   {
     id: 'codex',
@@ -47,7 +44,6 @@ export const HARNESS_CATALOG = [
       { bin: 'codex-acp', command: 'codex-acp', args: [], via: 'direct' },
       { bin: 'codex', command: 'npx', args: ['-y', '@agentclientprotocol/codex-acp'], via: 'npx', requires: 'npx' },
     ],
-    models: {},
   },
   {
     id: 'gemini',
@@ -55,7 +51,6 @@ export const HARNESS_CATALOG = [
     candidates: [
       { bin: 'gemini', command: 'gemini', args: ['--experimental-acp'], via: 'direct' },
     ],
-    models: {},
   },
 ];
 
@@ -134,7 +129,7 @@ export function whichSync(command, deps = {}) {
 /**
  * Scan for every catalog harness.
  *
- * @returns {Array<{id, label, detected, command, args, binPath, via, models}>}
+ * @returns {Array<{id, label, detected, command, args, binPath, via}>}
  *          One entry per catalog harness, detected or not, in catalog order.
  */
 export function detectHarnesses(deps = {}) {
@@ -153,7 +148,6 @@ export function detectHarnesses(deps = {}) {
         args: candidate.args,
         binPath,
         via: candidate.via,
-        models: harness.models,
       };
     }
     return {
@@ -164,7 +158,6 @@ export function detectHarnesses(deps = {}) {
       args: [],
       binPath: null,
       via: null,
-      models: harness.models,
     };
   });
 }

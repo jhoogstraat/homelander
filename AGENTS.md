@@ -62,7 +62,7 @@ Homelander is an **Electron app** with a **forked daemon process** for backgroun
 1. **User adds search** → URL validated → translated to mobile API params → saved in SQLite
 2. **Poll loop** → `engine/url-translator.js` → `fetchListings()` → IS24 Mobile API (`api.mobile.immobilienscout24.de/search/list`) → new listings written to SQLite with `status='seen'`
 3. **Apply loop** → picks one pending listing per filter → `MessageComposer.compose()` drafts the message (AI, else template) → `IS24Contactor.apply()` → opens expose page via CDP → fills contact form → submits → records outcome in SQLite
-   - **AI drafting** → `ai-providers.js` picks a provider (`acp` spawns an agent harness and speaks Agent Client Protocol over stdio; `openai-compatible` POSTs to any `/chat/completions` endpoint) → primary model, then `fallback_model`, then the template
+   - **AI drafting** → `ai-providers.js` picks a provider (`acp` spawns an agent harness and speaks Agent Client Protocol over stdio; `openai-compatible` POSTs to any `/chat/completions` endpoint) → `primary` attempt, then `fallback` attempt, then the template. Each attempt carries its own harness + model + reasoning level, so the fallback can be a different agent entirely.
 4. **Captcha wall** → 5 consecutive captcha failures → apply pauses for 15 min → auto-resumes
 5. **Session expiry** → IS24 login detected as expired → apply pauses → user re-logs in → resumes
 
@@ -139,9 +139,9 @@ Runtime config at `~/.homelander/config.json` — read/written by Electron main 
   "is24": { "email": "", "password": "" },
   "captcha": { "api_key": "" },
   "message_template": "... {{title}} {{address}} {{name}} ...",
-  "ai": { "enabled": false, "provider": "acp", "model": "claude-opus-5",
-          "fallback_model": "claude-sonnet-5", "timeout_seconds": 90, "prompt": "",
-          "command": "npx", "args": ["-y", "@agentclientprotocol/claude-agent-acp"],
+  "ai": { "enabled": false, "provider": "acp", "timeout_seconds": 90, "prompt": "",
+          "primary":  { "harness_id": "", "command": "", "args": [], "model": "", "thought_level": "" },
+          "fallback": { "harness_id": "", "command": "", "args": [], "model": "", "thought_level": "" },
           "cwd": "", "env": {}, "auth_method_id": "",
           "base_url": "", "api_key": "", "headers": {}, "max_tokens": 1024 },
   "timing": { "speed": "balanced", "overrides": {} },
@@ -221,5 +221,7 @@ Releases are `workflow_dispatch` only (never triggered automatically):
 - **AI message composition never blocks an application** — provider failure, timeout, refusal, or an unusable draft falls back to `message_template`; the daemon emits `ai_fallback` and applies anyway
 - **PATH must be augmented before spawning a harness** — an Electron app launched from Finder/Dock inherits a minimal PATH (`/usr/bin:/bin:...`), so Homebrew/nvm/npm-global installs are invisible; `augmentedPath()` in `harness-detect.js` is used for both detection and spawning
 - **Harness detection never spawns** — it is a PATH scan only, so it proves the binary exists, not that it speaks ACP; the Settings "Test" button is the real check
+- **Model and reasoning level come from the harness** — both are ACP *session config options* (`category: "model"` / `"thought_level"`) read from the `session/new` response and set with `session/set_config_option`; there is no `session/set_model`. Homelander stores no model list of its own, so a Codex slot never offers Sonnet
+- **Message language follows the listing** — `detectListingLanguage()` picks de/en from the listing text and the prompt pins the reply language; German is the default when signals are weak
 - **ACP client advertises no capabilities** — filesystem/terminal requests from the harness are refused and permission requests cancelled, so a coding harness can't touch the user's disk while drafting
 - **Contactor → about:blank after every apply** — fresh page for next listing to avoid SPA state carryover

@@ -474,16 +474,19 @@ function getDefaultConfig() {
     ].join('\n'),
     // AI message composition. Disabled by default — when off (or on any
     // failure) the daemon uses message_template unchanged.
+    //
+    // `primary` and `fallback` are independent attempts: each picks its own
+    // harness, model, and reasoning level, so the fallback can be a different
+    // agent entirely. Model/thought level start empty — the real values come
+    // from whatever the chosen harness advertises (ACP session config options).
     ai: {
       enabled: false,
       provider: 'acp',          // 'acp' | 'openai-compatible'
-      model: 'claude-opus-5',
-      fallback_model: 'claude-sonnet-5',
       timeout_seconds: 90,
       prompt: '',               // blank = built-in layout instructions
+      primary: { harness_id: '', command: '', args: [], model: '', thought_level: '' },
+      fallback: { harness_id: '', command: '', args: [], model: '', thought_level: '' },
       // provider: acp
-      command: 'npx',
-      args: ['-y', '@agentclientprotocol/claude-agent-acp'],
       cwd: '',
       env: {},
       auth_method_id: '',
@@ -1429,17 +1432,19 @@ function registerIpcHandlers() {
     }
   });
 
-  // Ask a harness which models it offers (ACP session config options). This
-  // does spawn the harness, unlike detection — it is only run on demand.
-  ipcMain.handle('ai:list-models', async (_e, aiPatch) => {
-    const ai = { ...(config.ai || {}), ...(aiPatch || {}), provider: 'acp' };
+  // Ask a harness what it offers for a session: models and reasoning levels
+  // (ACP session config options). This does spawn the harness, unlike
+  // detection, so it only runs on demand.
+  ipcMain.handle('ai:probe-harness', async (_e, payload) => {
+    const { ai: aiPatch, attempt } = payload || {};
+    const ai = { ...(config.ai || {}), ...(aiPatch || {}) };
     let provider = null;
     try {
-      provider = createProvider({ ai, model: '', log: (m) => console.log(`[ai:list-models] ${m}`) });
-      const models = await provider.listModels();
-      return { models, error: null };
+      provider = createProvider({ ai, attempt: attempt || {}, log: (m) => console.log(`[ai:probe] ${m}`) });
+      const result = await provider.listConfig();
+      return { ...result, error: null };
     } catch (err) {
-      return { models: [], ...gracefulFailure('ai:list-models', err, { code: 'AI_MODELS_FAILED' }) };
+      return { models: [], thoughtLevels: [], ...gracefulFailure('ai:probe-harness', err, { code: 'AI_PROBE_FAILED' }) };
     } finally {
       try { provider?.dispose(); } catch { /* already gone */ }
     }
@@ -1447,7 +1452,8 @@ function registerIpcHandlers() {
 
   // Dry-run the AI message composition against a sample listing so the user
   // can verify the harness/endpoint before it runs on a real application.
-  ipcMain.handle('ai:test', async (_e, aiPatch) => {
+  ipcMain.handle('ai:test', async (_e, payload) => {
+    const { ai: aiPatch, listing } = payload || {};
     const composer = new MessageComposer({
       config: {
         ...config,
@@ -1456,7 +1462,7 @@ function registerIpcHandlers() {
       log: (m) => console.log(`[ai:test] ${m}`),
     });
     try {
-      const result = await composer.compose({
+      const result = await composer.compose(listing || {
         title: 'Schöne 3-Zimmer-Wohnung mit Balkon',
         address: 'Musterstraße 42, 10115 Berlin',
         price: '1.250 € warm',
@@ -1470,7 +1476,7 @@ function registerIpcHandlers() {
           ...gracefulFailure('ai:test', new Error(result.errors.join('; ') || 'AI returned no usable message'), { code: 'AI_TEST_FAILED' }),
         };
       }
-      return { ok: true, text: result.text, model: result.model, error: null };
+      return { ok: true, text: result.text, attempt: result.attempt, language: result.language, error: null };
     } catch (err) {
       return { ok: false, ...gracefulFailure('ai:test', err, { code: 'AI_TEST_FAILED' }) };
     } finally {

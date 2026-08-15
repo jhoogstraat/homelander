@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { EventEmitter } from 'node:events';
-import { AcpClient, substituteVars, ACP_PROTOCOL_VERSION } from '../engine/acp-client.js';
+import { AcpClient, substituteVars, ACP_PROTOCOL_VERSION, CONFIG_KINDS } from '../engine/acp-client.js';
 
 /**
  * A fake agent process: collects what the client writes and lets the test
@@ -50,15 +50,17 @@ function defaultAgent(overrides = {}) {
           emit({ jsonrpc: '2.0', id: msg.id, result: sessionResult });
           break;
         case 'session/set_config_option':
+          // Agents reply with the COMPLETE option list, not just the one that
+          // changed — mirror that so tests catch code which assumes otherwise.
           emit({
             jsonrpc: '2.0',
             id: msg.id,
             result: {
-              configOptions: [{
-                configId: 'model', category: 'model', type: 'select',
-                currentValue: msg.params.value,
-                options: [{ value: 'claude-opus-5', name: 'Opus 5' }, { value: 'claude-sonnet-5', name: 'Sonnet 5' }],
-              }],
+              configOptions: (sessionResult.configOptions || []).map((o) => (
+                (o.configId || o.id) === msg.params.configId
+                  ? { ...o, currentValue: msg.params.value }
+                  : o
+              )),
             },
           });
           break;
@@ -173,7 +175,7 @@ describe('AcpClient model selection', () => {
       { value: 'claude-opus-5', name: 'Opus 5', description: 'Most capable' },
       { value: 'claude-sonnet-5', name: 'Sonnet 5', description: '' },
     ]);
-    assert.equal(client.currentModelId, 'claude-sonnet-5');
+    assert.equal(client.currentValueFor(CONFIG_KINDS.model), 'claude-sonnet-5');
     client.dispose();
   });
 
@@ -208,7 +210,7 @@ describe('AcpClient model selection', () => {
     assert.equal(call.params.value, 'claude-opus-5');
     assert.equal(call.params.sessionId, 'sess-1');
     assert.equal(result.modelSelection, 'session');
-    assert.equal(client.currentModelId, 'claude-opus-5');
+    assert.equal(client.currentValueFor(CONFIG_KINDS.model), 'claude-opus-5');
     client.dispose();
   });
 
@@ -276,6 +278,55 @@ describe('AcpClient model selection', () => {
     const client = clientFor(agent, { model: 'claude-opus-5' });
     const result = await client.connect();
     assert.equal(result.modelSelection, 'spawn');
+    assert.equal(client.sessionId, 'sess-1');
+    client.dispose();
+  });
+
+  it('applies a thought level when the agent offers one', async () => {
+    const session = {
+      sessionId: 'sess-1',
+      configOptions: [
+        {
+          configId: 'model', category: 'model', type: 'select', currentValue: 'claude-opus-5',
+          options: [{ value: 'claude-opus-5', name: 'Opus 5' }],
+        },
+        {
+          configId: 'thinking', category: 'thought_level', type: 'select', currentValue: 'low',
+          options: [{ value: 'low', name: 'Low' }, { value: 'high', name: 'High' }],
+        },
+      ],
+    };
+    const agent = defaultAgent({ sessionResult: session });
+    const client = clientFor(agent, { model: 'claude-opus-5', thoughtLevel: 'high' });
+    await client.connect();
+
+    assert.deepEqual(client.availableThoughtLevels(), [
+      { value: 'low', name: 'Low', description: '' },
+      { value: 'high', name: 'High', description: '' },
+    ]);
+    const call = agent.written.find((m) => m.method === 'session/set_config_option' && m.params.configId === 'thinking');
+    assert.equal(call.params.value, 'high');
+    client.dispose();
+  });
+
+  it('recognises a thought-level option by id when category is missing', async () => {
+    const agent = defaultAgent({
+      sessionResult: {
+        sessionId: 'sess-1',
+        configOptions: [{ configId: 'reasoning_effort', type: 'select', options: [{ value: 'high', name: 'High' }] }],
+      },
+    });
+    const client = clientFor(agent);
+    await client.connect();
+    assert.deepEqual(client.availableThoughtLevels().map((l) => l.value), ['high']);
+    client.dispose();
+  });
+
+  it('ignores a thought level the harness does not offer', async () => {
+    const agent = defaultAgent();
+    const client = clientFor(agent, { thoughtLevel: 'ultra' });
+    await client.connect();
+    assert.equal(agent.written.some((m) => m.method === 'session/set_config_option'), false);
     assert.equal(client.sessionId, 'sess-1');
     client.dispose();
   });

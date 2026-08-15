@@ -117,7 +117,7 @@ describe('detectHarnesses', () => {
     const claude = detectHarnesses(deps).find((h) => h.id === 'claude-code');
     assert.equal(claude.detected, true);
     assert.equal(claude.command, 'npx');
-    assert.deepEqual(claude.args, ['-y', '@agentclientprotocol/claude-code-acp']);
+    assert.deepEqual(claude.args, ['-y', '@agentclientprotocol/claude-agent-acp']);
     assert.equal(claude.via, 'npx');
     assert.equal(claude.binPath, '/usr/bin/claude');
   });
@@ -140,9 +140,9 @@ describe('detectHarnesses', () => {
     assert.equal(found.find((h) => h.id === 'claude-code').detected, false);
   });
 
-  it('suggests models only where they are unambiguous', () => {
+  it('suggests no models — those come from the harness itself', () => {
     const found = detectHarnesses(posix(['/usr/bin/npx', '/usr/bin/claude', '/usr/bin/codex']));
-    assert.equal(found.find((h) => h.id === 'claude-code').models.model, 'claude-opus-5');
-    assert.deepEqual(found.find((h) => h.id === 'codex').models, {});
+    assert.equal(found.find((h) => h.id === 'claude-code').models, undefined);
+    assert.equal(found.find((h) => h.id === 'codex').models, undefined);
   });
 });

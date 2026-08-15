@@ -300,7 +300,7 @@ async function applyOne(listing, filterId, db) {
   });
   const message = composed.text;
   if (composed.source === 'ai') {
-    emit({ type: 'ai_message', exposeId: listing.expose_id, model: composed.model });
+    emit({ type: 'ai_message', exposeId: listing.expose_id, attempt: composed.attempt, language: composed.language });
   } else if (composed.errors.length > 0) {
     log(`  AI compose unavailable — using template (${composed.errors.join('; ')})`);
     emit({ type: 'ai_fallback', exposeId: listing.expose_id, errors: composed.errors });
@@ -922,7 +922,7 @@ function setupIpc(db) {
         // Drops cached harness processes so the next draft uses the new
         // command/model/prompt.
         composer?.updateConfig(currentConfig);
-        log(`Config hot-reload: AI config updated (enabled=${Boolean(msg.ai.enabled)}, provider=${msg.ai.provider || 'acp'}, model=${msg.ai.model || 'harness default'})`);
+        log(`Config hot-reload: AI config updated (enabled=${Boolean(msg.ai.enabled)}, provider=${msg.ai.provider || 'acp'}, primary=${msg.ai.primary?.harness_id || 'unset'})`);
         changed = true;
       }
       if (msg.captcha) {
@@ -994,7 +994,7 @@ async function main() {
 
   composer = new MessageComposer({ config: currentConfig, log });
   log(currentConfig.ai?.enabled
-    ? `AI message composition enabled (provider=${currentConfig.ai.provider || 'acp'}, model=${currentConfig.ai.model || 'harness default'})`
+    ? `AI message composition enabled (provider=${currentConfig.ai.provider || 'acp'}, primary=${currentConfig.ai.primary?.harness_id || 'unset'}, fallback=${currentConfig.ai.fallback?.harness_id || 'none'})`
     : 'AI message composition disabled — using message template');
 
   // Open database

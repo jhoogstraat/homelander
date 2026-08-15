@@ -24,11 +24,53 @@ export const DEFAULT_AI_PROMPT = [
   '- Formuliere flüssig und natürlich statt Platzhalter einzusetzen.',
   '- Beziehe dich konkret auf das Inserat und die Person.',
   '- Erfinde keine Angaben, die nicht in den Daten stehen.',
-  '- Deutsch, höflich, sachlich, max. 200 Wörter.',
+  '- Höflich, sachlich, max. 200 Wörter.',
   '',
   'Antworte ausschließlich mit dem fertigen Nachrichtentext — keine Anrede an mich,',
   'keine Erklärungen, keine Optionen, kein Markdown.',
 ].join('\n');
+
+// ── Listing language ────────────────────────────────────────────
+//
+// IS24 is a German site but plenty of listings are written in English (and a
+// landlord who advertises in English generally wants to be answered in
+// English). We detect from the listing text and tell the agent which language
+// to write in — the AI would otherwise default to whatever its prompt is in.
+
+const LANGUAGE_HINTS = {
+  de: /\b(wohnung|zimmer|miete|kaltmiete|warmmiete|balkon|wohnfläche|stellplatz|küche|bad|altbau|neubau|etage|erdgeschoss|provisionsfrei|nebenkosten|geeignet|gelegen|befindet)\b/gi,
+  en: /\b(apartment|flat|room|rent|rental|kitchen|bathroom|balcony|furnished|floor|available|located|deposit|utilities|spacious|bedroom)\b/gi,
+};
+
+export const LANGUAGE_NAMES = { de: 'Deutsch', en: 'English' };
+
+/**
+ * Guess the language a listing is written in.
+ * German is the default: on a German portal an ambiguous listing (or one with
+ * nothing but a street name) is far more likely German than English.
+ * @returns {'de'|'en'}
+ */
+export function detectListingLanguage(listing = {}) {
+  const text = [listing.title, listing.address, listing.description, listing.subtitle]
+    .filter(Boolean).join(' ');
+  if (!text.trim()) return 'de';
+
+  const score = (rx) => (text.match(rx) || []).length;
+  const de = score(LANGUAGE_HINTS.de);
+  const en = score(LANGUAGE_HINTS.en);
+  // Umlauts and ß are a strong German signal that survives short titles.
+  const umlauts = (text.match(/[äöüßÄÖÜ]/g) || []).length;
+
+  if (en > de + umlauts) return 'en';
+  return 'de';
+}
+
+/** The instruction that pins the reply language. */
+export function languageInstruction(language) {
+  return language === 'en'
+    ? 'The listing is written in English. Write the message in English.'
+    : 'Das Inserat ist auf Deutsch. Schreibe die Nachricht auf Deutsch.';
+}
 
 /** The original template substitution — unchanged behaviour, now shared. */
 export function renderTemplate(template, listing) {
@@ -78,8 +120,9 @@ function labelledLines(source, labels) {
  * Build the single prompt sent to the harness: listing context, persona
  * context, and the template as the requested layout.
  */
-export function buildPrompt({ listing = {}, persona = {}, template = '', instructions = '' }) {
-  const sections = [instructions || DEFAULT_AI_PROMPT, ''];
+export function buildPrompt({ listing = {}, persona = {}, template = '', instructions = '', language }) {
+  const lang = language || detectListingLanguage(listing);
+  const sections = [instructions || DEFAULT_AI_PROMPT, '', languageInstruction(lang), ''];
 
   const listingLines = labelledLines(listing, LISTING_LABELS);
   sections.push('## Inserat', listingLines.length ? listingLines.join('\n') : '- (keine Angaben)', '');
@@ -113,12 +156,54 @@ export function sanitizeDraft(raw) {
   return { ok: true, text };
 }
 
-/** Models to try, in order: primary, then fallback. Blank = harness default. */
-export function modelChain(ai = {}) {
-  const chain = [ai.model, ai.fallback_model]
-    .map((m) => String(m || '').trim())
-    .filter((m, i, arr) => m && arr.indexOf(m) === i);
-  return chain.length ? chain : [''];
+/** One attempt slot, normalised. */
+function normaliseAttempt(slot, raw) {
+  if (!raw) return null;
+  return {
+    slot,
+    harness_id: String(raw.harness_id || '').trim(),
+    command: String(raw.command || '').trim(),
+    args: Array.isArray(raw.args) ? raw.args : String(raw.args || '').trim().split(/\s+/).filter(Boolean),
+    model: String(raw.model || '').trim(),
+    thought_level: String(raw.thought_level || '').trim(),
+  };
+}
+
+/** Does this attempt have enough configured to be worth trying? */
+function attemptIsUsable(attempt, provider) {
+  if (!attempt) return false;
+  // ACP needs a harness to spawn; an HTTP endpoint needs a model to request.
+  return provider === 'acp' ? Boolean(attempt.command) : Boolean(attempt.model);
+}
+
+/**
+ * Attempts to try, in order: primary, then fallback.
+ *
+ * Each slot carries its own harness, model, and reasoning level, so the
+ * fallback can be a completely different agent — e.g. Claude Code at high
+ * reasoning first, Codex second.
+ */
+export function attemptChain(ai = {}) {
+  const provider = ai.provider || 'acp';
+  const chain = [normaliseAttempt('primary', ai.primary), normaliseAttempt('fallback', ai.fallback)]
+    .filter((a) => attemptIsUsable(a, provider));
+
+  // A fallback identical to the primary would just repeat the same failure.
+  const seen = new Set();
+  return chain.filter((a) => {
+    const key = JSON.stringify([a.command, a.args, a.model, a.thought_level]);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/** Human-readable label for logs and the UI. */
+export function attemptLabel(attempt) {
+  const parts = [attempt.harness_id || attempt.command || 'harness'];
+  if (attempt.model) parts.push(attempt.model);
+  if (attempt.thought_level) parts.push(attempt.thought_level);
+  return parts.join(' / ');
 }
 
 export class MessageComposer {
@@ -161,22 +246,24 @@ export class MessageComposer {
     this.disposeProviders();
   }
 
-  _providerFor(model) {
-    const cached = this._providers.get(model);
-    if (cached) return cached;
+  _providerFor(attempt) {
+    const key = JSON.stringify([attempt.command, attempt.args, attempt.model, attempt.thought_level]);
+    const cached = this._providers.get(key);
+    if (cached) return { key, provider: cached };
     const provider = this._makeProvider({
       ai: this.ai,
-      model,
+      attempt,
       log: this.log,
       spawn: this._spawn,
       fetchImpl: this._fetch,
     });
-    this._providers.set(model, provider);
-    return provider;
+    this._providers.set(key, provider);
+    return { key, provider };
   }
 
-  async _draftWith(model, prompt) {
-    const text = await this._providerFor(model).draft(prompt);
+  async _draftWith(attempt, prompt) {
+    const { provider } = this._providerFor(attempt);
+    const text = await provider.draft(prompt);
     const clean = sanitizeDraft(text);
     if (!clean.ok) throw new Error(clean.reason);
     return clean.text;
@@ -185,43 +272,52 @@ export class MessageComposer {
   /**
    * Compose the message for one listing.
    * @param {object} listing  Listing row; `_contact` carries the persona
-   * @returns {Promise<{text: string, source: 'ai'|'template', model?: string, errors: string[]}>}
+   * @returns {Promise<{text, source: 'ai'|'template', attempt?, language, errors: string[]}>}
    */
   async compose(listing) {
     const template = this.config.message_template || '';
     const persona = listing?._contact || this.config.persona || {};
+    const language = detectListingLanguage(listing);
     const fallback = () => renderTemplate(template, listing);
 
-    if (!this.ai.enabled) return { text: fallback(), source: 'template', errors: [] };
+    if (!this.ai.enabled) return { text: fallback(), source: 'template', language, errors: [] };
+
+    const chain = attemptChain(this.ai);
+    if (chain.length === 0) {
+      this.log('AI enabled but no harness/model configured — using the message template');
+      return { text: fallback(), source: 'template', language, errors: ['no attempt configured'] };
+    }
 
     const prompt = buildPrompt({
       listing,
       persona,
       template,
       instructions: this.ai.prompt,
+      language,
     });
 
     const errors = [];
-    for (const model of modelChain(this.ai)) {
-      const label = model || 'harness default';
+    for (const attempt of chain) {
+      const label = attemptLabel(attempt);
       try {
-        const text = await this._draftWith(model, prompt);
-        this.log(`AI message composed via ACP (model: ${label})`);
-        return { text, source: 'ai', model: label, errors };
+        const text = await this._draftWith(attempt, prompt);
+        this.log(`AI message composed (${attempt.slot}: ${label}, language: ${language})`);
+        return { text, source: 'ai', attempt: label, slot: attempt.slot, language, errors };
       } catch (err) {
         errors.push(`${label}: ${err.message}`);
-        this.log(`AI compose failed (model: ${label}): ${err.message}`);
+        this.log(`AI compose failed (${attempt.slot}: ${label}): ${err.message}`);
         // A broken provider (e.g. a dead harness process) must not be reused
         // for the next attempt.
-        const provider = this._providers.get(model);
+        const key = JSON.stringify([attempt.command, attempt.args, attempt.model, attempt.thought_level]);
+        const provider = this._providers.get(key);
         if (provider) {
           try { provider.dispose?.(); } catch { /* already gone */ }
-          this._providers.delete(model);
+          this._providers.delete(key);
         }
       }
     }
 
-    this.log('AI compose exhausted all models — falling back to the message template');
-    return { text: fallback(), source: 'template', errors };
+    this.log('AI compose exhausted every attempt — falling back to the message template');
+    return { text: fallback(), source: 'template', language, errors };
   }
 }
