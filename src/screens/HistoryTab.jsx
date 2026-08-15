@@ -7,6 +7,7 @@ import { ExternalLinkIcon, RetryIcon } from '../shared/Icons';
 import { swallow } from '../shared/logCatch.js';
 import { useStore } from '../stores/appStore';
 import { userErrorText } from '../shared/userErrors';
+import { formatListingMeta } from '../shared/listingMeta';
 
 const PAGE_SIZE = 30;
 const OUTCOME_KEYS = [
@@ -191,6 +192,11 @@ function HistoryEntry({ listing, isExpanded, onToggle, onRetry, retrying, onSupp
           {listing.address && (
             <p className="text-xs truncate mt-0.5" style={{ color: 'var(--text-muted)' }}>
               {listing.address}
+            </p>
+          )}
+          {formatListingMeta(listing.price, listing.size) && (
+            <p className="text-xs truncate mt-0.5" style={{ color: 'var(--text-muted)' }}>
+              {formatListingMeta(listing.price, listing.size)}
             </p>
           )}
         </div>
