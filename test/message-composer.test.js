@@ -10,9 +10,10 @@ import {
   attemptChain,
   attemptLabel,
   detectListingLanguage,
-  languageInstruction,
-  renderTemplate,
+  looksLikeRefusal,
   DEFAULT_AI_PROMPT,
+  PROMPT_VARIABLES,
+  renderTemplate,
 } from '../engine/message-composer.js';
 import { createProvider, PROVIDER_IDS } from '../engine/ai-providers.js';
 
@@ -57,31 +58,54 @@ describe('renderTemplate', () => {
 });
 
 describe('buildPrompt', () => {
-  it('includes instructions, listing, persona, and the template', () => {
+  it('fills the built-in prompt with this listing', () => {
+    const prompt = buildPrompt({ listing: LISTING, persona: LISTING._contact, template: TEMPLATE });
+    assert.match(prompt, /^Ich bewerbe mich/);
+    assert.match(prompt, /Titel: Schöne 3-Zimmer-Wohnung/);
+    assert.match(prompt, /Vorname: Max/);
+    // Template shown already filled in, so no placeholder survives.
+    assert.match(prompt, /ich interessiere mich für Schöne 3-Zimmer-Wohnung/);
+    assert.doesNotMatch(prompt, /\{\{\w+\}\}/);
+  });
+
+  it('uses a custom prompt verbatim, substituting only its variables', () => {
     const prompt = buildPrompt({
       listing: LISTING,
       persona: LISTING._contact,
       template: TEMPLATE,
-      instructions: 'INSTRUCTIONS-HERE',
+      prompt: 'MY PROMPT\n{{listing}}\n{{persona}}\n{{template}}\nSprache: {{language}}',
     });
-    assert.match(prompt, /INSTRUCTIONS-HERE/);
-    assert.match(prompt, /## Inserat/);
+    assert.match(prompt, /^MY PROMPT/);
     assert.match(prompt, /Titel: Schöne 3-Zimmer-Wohnung/);
-    assert.match(prompt, /## Bewerber/);
     assert.match(prompt, /Vorname: Max/);
-    assert.match(prompt, /## Vorlage/);
-    assert.match(prompt, /\{\{title\}\}/); // template passed through verbatim
+    assert.match(prompt, /Sprache: Deutsch/);
+    assert.doesNotMatch(prompt, /Ich bewerbe mich/); // built-in text not appended
   });
 
-  it('uses the built-in instructions when none are configured', () => {
-    const prompt = buildPrompt({ listing: LISTING, persona: {}, template: '' });
-    assert.ok(prompt.startsWith(DEFAULT_AI_PROMPT));
+  it('pins the reply language to the listing language', () => {
+    const english = { title: 'Bright furnished apartment', description: 'Spacious bedroom, rent includes utilities.' };
+    assert.match(buildPrompt({ listing: english, persona: {}, template: '' }), /auf English/);
+    assert.match(buildPrompt({ listing: LISTING, persona: {}, template: '' }), /auf Deutsch/);
+  });
+
+  it('leaves unknown variables alone', () => {
+    assert.match(buildPrompt({ listing: LISTING, prompt: 'x {{nope}} y' }), /\{\{nope\}\}/);
+  });
+
+  it('says so plainly when a section has nothing to show', () => {
+    const prompt = buildPrompt({ listing: {}, persona: {}, template: '' });
+    assert.match(prompt, /keinen Standardtext/);
+    assert.match(prompt, /\(keine Angaben\)/);
   });
 
   it('omits blank fields instead of emitting empty labels', () => {
     const prompt = buildPrompt({ listing: { title: 'A', address: '' }, persona: {}, template: '' });
     assert.doesNotMatch(prompt, /Adresse:/);
-    assert.match(prompt, /\(keine Angaben\)/); // empty persona section
+  });
+
+  it('documents every variable the built-in prompt uses', () => {
+    const used = [...DEFAULT_AI_PROMPT.matchAll(/\{\{(\w+)\}\}/g)].map((m) => m[1]);
+    for (const name of used) assert.ok(PROMPT_VARIABLES.includes(name), `${name} not documented`);
   });
 });
 
@@ -102,6 +126,33 @@ describe('sanitizeDraft', () => {
     assert.equal(sanitizeDraft('   ').ok, false);
     assert.equal(sanitizeDraft('too short').ok, false);
     assert.equal(sanitizeDraft('x'.repeat(4001)).ok, false);
+  });
+
+  it('rejects an agent that answered us instead of drafting', () => {
+    const refusal = "This looks like output from a local command (a rendered AI prompt template), not an actual request. I won't act on it. Let me know what you'd like me to do.";
+    const result = sanitizeDraft(refusal);
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /replied to us/);
+
+    assert.equal(sanitizeDraft('Ich kann dir dabei nicht helfen, das sieht nach einem Prompt-Dump aus. Was möchtest du stattdessen?').ok, false);
+    assert.equal(looksLikeRefusal('As an AI, I cannot write this message for you at all.'), true);
+  });
+
+  it('does not mistake a real message for a refusal', () => {
+    const real = [
+      'Sehr geehrte Damen und Herren,',
+      '',
+      'Ihre 3-Zimmer-Wohnung in der Musterstraße hat mich sofort angesprochen.',
+      'Ich bin angestellt und würde gern zum 01.10.2026 einziehen.',
+      '',
+      'Viele Grüße',
+      'Max Mustermann',
+    ].join('\n');
+    assert.equal(looksLikeRefusal(real), false);
+    assert.equal(sanitizeDraft(real).ok, true);
+
+    const english = 'Dear Sir or Madam, I would like to apply for your flat and can move in on 1 October. I am employed full time and can provide all documents. Kind regards, Max';
+    assert.equal(sanitizeDraft(english).ok, true);
   });
 
   it('rejects a response that still has template placeholders', () => {
@@ -194,10 +245,6 @@ describe('detectListingLanguage', () => {
     assert.equal(detectListingLanguage({ title: 'Apartment mit Küche und Wohnfläche' }), 'de');
   });
 
-  it('produces an instruction in the matching language', () => {
-    assert.match(languageInstruction('en'), /in English/);
-    assert.match(languageInstruction('de'), /auf Deutsch/);
-  });
 });
 
 describe('MessageComposer', () => {
@@ -347,14 +394,14 @@ describe('MessageComposer', () => {
   it('passes the current template, persona, and language into the prompt', async () => {
     const stub = stubProvider([DRAFT]);
     const composer = new MessageComposer({
-      config: baseConfig({ enabled: true, primary: slot({ model: 'opus' }), prompt: 'CUSTOM' }),
+      config: baseConfig({ enabled: true, primary: slot({ model: 'opus' }), prompt: 'CUSTOM {{listing}} {{persona}} {{language}}' }),
       makeProvider: stub.makeProvider,
     });
 
     await composer.compose(LISTING);
     const { prompt } = stub.calls[0];
-    assert.match(prompt, /^CUSTOM/);
-    assert.match(prompt, /auf Deutsch/);
+    assert.match(prompt, /^CUSTOM/);         // the user's prompt is used verbatim
+    assert.match(prompt, /Deutsch/);         // {{language}} substituted
     assert.match(prompt, /Vorname: Max/);
     assert.match(prompt, /Schöne 3-Zimmer-Wohnung/);
   });
@@ -369,7 +416,7 @@ describe('MessageComposer', () => {
     const english = { title: 'Bright furnished apartment', description: 'Spacious bedroom, rent includes utilities.' };
     const result = await composer.compose(english);
     assert.equal(result.language, 'en');
-    assert.match(stub.calls[0].prompt, /in English/);
+    assert.match(stub.calls[0].prompt, /auf English/);
   });
 
   it('reports the listing language even on the template path', async () => {

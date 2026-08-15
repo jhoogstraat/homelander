@@ -66,6 +66,8 @@ export default function SettingsTab() {
   const [harnesses, setHarnesses] = useState([]);
   // Per-slot probe results: { [slot]: 'loading' | { models, thoughtLevels } }
   const [aiOptions, setAiOptions] = useState({});
+  // The built-in prompt, fetched once so Reset has something to restore to.
+  const [defaultPrompt, setDefaultPrompt] = useState(null);
   const [cleanupStep, setCleanupStep] = useState(null); // null | 'confirm' | 'purging'
   const [cleanupEmail, setCleanupEmail] = useState('');
   const [cleanupError, setCleanupError] = useState(null);
@@ -133,7 +135,7 @@ export default function SettingsTab() {
       enabled: Boolean(ai.enabled),
       provider: ai.provider || 'acp',
       timeout_seconds: ai.timeout_seconds ?? 90,
-      prompt: ai.prompt || '',
+      prompt: ai.prompt || '',   // filled from the built-in default once fetched
       primary: slot(ai.primary),
       fallback: slot(ai.fallback),
       base_url: ai.base_url || '',
@@ -147,6 +149,9 @@ export default function SettingsTab() {
     let cancelled = false;
     window.homelander.detectAiHarnesses().then((res) => {
       if (!cancelled) setHarnesses((res?.harnesses || []).filter((h) => h.detected));
+    });
+    window.homelander.getDefaultAiPrompt?.().then((res) => {
+      if (!cancelled && res?.prompt) setDefaultPrompt(res);
     });
     return () => { cancelled = true; };
   }, []);
@@ -281,6 +286,10 @@ export default function SettingsTab() {
       }
       return { ...prev, [slot]: next };
     });
+  };
+
+  const resetAiPrompt = () => {
+    if (defaultPrompt?.prompt) updateAiField('prompt', defaultPrompt.prompt);
   };
 
   const saveAi = () => save({ ai: aiPatchFromDraft() });
@@ -746,14 +755,34 @@ export default function SettingsTab() {
                 )}
 
                 <div>
-                  <label className="text-xs mb-1 block" style={{ color: 'var(--text-muted)' }}>{t('settings.ai.prompt')}</label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-xs" style={{ color: 'var(--text-muted)' }}>{t('settings.ai.prompt')}</label>
+                    <button
+                      className="btn btn-ghost text-xs"
+                      onClick={resetAiPrompt}
+                      disabled={!defaultPrompt || aiDraft.prompt === defaultPrompt.prompt}
+                    >
+                      {t('settings.ai.promptReset')}
+                    </button>
+                  </div>
                   <textarea
                     className="input resize-y text-sm font-mono leading-6"
-                    rows={4}
-                    value={aiDraft.prompt}
+                    rows={16}
+                    value={aiDraft.prompt || defaultPrompt?.prompt || ''}
                     onChange={(e) => updateAiField('prompt', e.target.value)}
-                    placeholder={t('settings.ai.promptPlaceholder')}
                   />
+                  <div className="mt-2 flex gap-2 items-center flex-wrap">
+                    <span className="text-xs" style={{ color: 'var(--text-muted)' }}>{t('settings.ai.promptVariables')}</span>
+                    {(defaultPrompt?.variables || []).map((v) => (
+                      <code
+                        key={v}
+                        className="text-xs px-1.5 py-0.5 rounded"
+                        style={{ background: 'var(--bg-secondary)', color: 'var(--accent)' }}
+                      >
+                        {`{{${v}}}`}
+                      </code>
+                    ))}
+                  </div>
                   <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>{t('settings.ai.promptDesc')}</p>
                 </div>
 

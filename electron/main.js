@@ -11,7 +11,7 @@ import { homedir, platform } from 'node:os';
 import { randomUUID, createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { ChromeManager } from './chrome.js';
-import { MessageComposer } from '../engine/message-composer.js';
+import { MessageComposer, DEFAULT_AI_PROMPT, PROMPT_VARIABLES } from '../engine/message-composer.js';
 import { detectHarnesses } from '../engine/harness-detect.js';
 import { createProvider } from '../engine/ai-providers.js';
 import { createSupportId, rawErrorText, redact, toUserError } from '../src/shared/userErrors.js';
@@ -1431,6 +1431,14 @@ function registerIpcHandlers() {
       return { harnesses: [], ...gracefulFailure('ai:detect-harnesses', err, { code: 'AI_DETECT_FAILED' }) };
     }
   });
+
+  // The built-in prompt, so Settings can show and reset to it. The renderer
+  // cannot import engine modules (they pull in node:fs), hence the IPC.
+  ipcMain.handle('ai:default-prompt', () => ({
+    prompt: DEFAULT_AI_PROMPT,
+    variables: PROMPT_VARIABLES,
+    error: null,
+  }));
 
   // Ask a harness what it offers for a session: models and reasoning levels
   // (ACP session config options). This does spawn the harness, unlike

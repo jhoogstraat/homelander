@@ -16,19 +16,43 @@ import { createProvider } from './ai-providers.js';
 const MIN_DRAFT_CHARS = 40;
 const MAX_DRAFT_CHARS = 4000;
 
+/**
+ * The whole prompt, as a template the user can edit in Settings.
+ *
+ * Placeholders are filled in per listing:
+ *   {{listing}}   facts about the flat
+ *   {{persona}}   facts about the applicant
+ *   {{template}}  the message template, already filled in for this listing
+ *   {{language}}  the listing's language, so the reply matches it
+ *
+ * It is deliberately phrased as a person asking for help: a coding harness
+ * treats section headers, bullet dumps and placeholders left unexpanded as
+ * untrusted tool output and answers with a refusal instead of a draft.
+ */
 export const DEFAULT_AI_PROMPT = [
-  'Du schreibst Anschreiben für Wohnungsbewerbungen auf ImmobilienScout24.',
+  'Ich bewerbe mich auf eine Mietwohnung auf ImmobilienScout24 und brauche den Text für das Kontaktformular.',
   '',
-  'Schreibe EINE Nachricht an den Vermieter:',
-  '- Nutze die Vorlage als Vorbild für Aufbau, Ton und Länge.',
-  '- Formuliere flüssig und natürlich statt Platzhalter einzusetzen.',
-  '- Beziehe dich konkret auf das Inserat und die Person.',
-  '- Erfinde keine Angaben, die nicht in den Daten stehen.',
-  '- Höflich, sachlich, max. 200 Wörter.',
+  'Das ist die Wohnung:',
+  '{{listing}}',
   '',
-  'Antworte ausschließlich mit dem fertigen Nachrichtentext — keine Anrede an mich,',
-  'keine Erklärungen, keine Optionen, kein Markdown.',
+  'Das bin ich:',
+  '{{persona}}',
+  '',
+  'So schreibe ich solche Nachrichten normalerweise:',
+  '{{template}}',
+  '',
+  'Bitte halte dich an Folgendes:',
+  '- Nimm meinen bisherigen Text als Vorbild für Aufbau, Ton und Länge.',
+  '- Schreib flüssig und natürlich, nicht schematisch.',
+  '- Geh konkret auf die Wohnung und auf mich ein.',
+  '- Erfinde nichts dazu, was nicht in meinen Angaben steht.',
+  '- Höflich, sachlich, höchstens 200 Wörter.',
+  '',
+  'Schreib mir bitte die Nachricht an den Vermieter auf {{language}}. Antworte nur mit dem Nachrichtentext selbst — keine Einleitung, keine Erklärung, keine Rückfrage, kein Markdown.',
 ].join('\n');
+
+/** Placeholders the prompt may use — shown in Settings. */
+export const PROMPT_VARIABLES = ['listing', 'persona', 'template', 'language'];
 
 // ── Listing language ────────────────────────────────────────────
 //
@@ -63,13 +87,6 @@ export function detectListingLanguage(listing = {}) {
 
   if (en > de + umlauts) return 'en';
   return 'de';
-}
-
-/** The instruction that pins the reply language. */
-export function languageInstruction(language) {
-  return language === 'en'
-    ? 'The listing is written in English. Write the message in English.'
-    : 'Das Inserat ist auf Deutsch. Schreibe die Nachricht auf Deutsch.';
 }
 
 /** The original template substitution — unchanged behaviour, now shared. */
@@ -117,22 +134,54 @@ function labelledLines(source, labels) {
 }
 
 /**
- * Build the single prompt sent to the harness: listing context, persona
- * context, and the template as the requested layout.
+ * Fill the prompt template with this listing's facts.
+ * @param {object} opts
+ * @param {string} [opts.prompt] The user's prompt; falls back to DEFAULT_AI_PROMPT
  */
-export function buildPrompt({ listing = {}, persona = {}, template = '', instructions = '', language }) {
+export function buildPrompt({ listing = {}, persona = {}, template = '', prompt = '', language }) {
   const lang = language || detectListingLanguage(listing);
-  const sections = [instructions || DEFAULT_AI_PROMPT, '', languageInstruction(lang), ''];
-
   const listingLines = labelledLines(listing, LISTING_LABELS);
-  sections.push('## Inserat', listingLines.length ? listingLines.join('\n') : '- (keine Angaben)', '');
-
   const personaLines = labelledLines(persona, PERSONA_LABELS);
-  sections.push('## Bewerber', personaLines.length ? personaLines.join('\n') : '- (keine Angaben)', '');
+  // Render the template so the example reads as a message, not as a file.
+  const example = renderTemplate(template, listing).trim();
 
-  sections.push('## Vorlage (Aufbau und Ton)', String(template || '').trim() || '(keine Vorlage hinterlegt)');
+  const values = {
+    listing: listingLines.length ? listingLines.join('\n') : '- (keine Angaben)',
+    persona: personaLines.length ? personaLines.join('\n') : '- (keine Angaben)',
+    template: example || '(Ich habe noch keinen Standardtext.)',
+    language: LANGUAGE_NAMES[lang] || LANGUAGE_NAMES.de,
+  };
 
-  return sections.join('\n');
+  return String(prompt || DEFAULT_AI_PROMPT)
+    .replace(/\{\{(\w+)\}\}/g, (match, key) => (
+      Object.prototype.hasOwnProperty.call(values, key) ? values[key] : match
+    ))
+    .trim();
+}
+
+/**
+ * Phrases a message to a landlord would never contain, but an agent that
+ * declined the task routinely does. A coding harness sometimes classifies the
+ * prompt as tool output and answers with a refusal or a follow-up question;
+ * that text is well-formed enough to pass every other check, so it has to be
+ * caught by name or it ends up in the contact form.
+ */
+const REFUSAL_MARKERS = [
+  /\bi (?:won'?t|will not|can'?t|cannot|am unable to)\b/i,
+  /\b(?:let me know what|what would you like|how (?:can|may) i help)\b/i,
+  /\blooks like (?:output|the output|a rendered)\b/i,
+  /\boutput from a (?:local )?command\b/i,
+  /\b(?:prompt|message) template\b/i,
+  /\bsystem (?:prompt|reminder)\b/i,
+  /\bas an ai\b/i,
+  /\bich (?:kann|werde) (?:dir )?(?:dabei |hierbei )?nicht\b/i,
+  /\bwas möchtest du\b/i,
+  /\bsoll ich (?:das|dir|stattdessen)\b/i,
+];
+
+/** Does this read as the agent talking to us rather than to the landlord? */
+export function looksLikeRefusal(text) {
+  return REFUSAL_MARKERS.some((rx) => rx.test(text));
 }
 
 /**
@@ -152,6 +201,8 @@ export function sanitizeDraft(raw) {
   // Unsubstituted placeholders mean the agent echoed the template instead of
   // writing a message.
   if (/\{\{\w+\}\}/.test(text)) return { ok: false, reason: 'response still contains template placeholders' };
+  // The agent answered us instead of drafting — treat as a failed attempt.
+  if (looksLikeRefusal(text)) return { ok: false, reason: 'agent replied to us instead of writing the message' };
 
   return { ok: true, text };
 }
@@ -292,7 +343,7 @@ export class MessageComposer {
       listing,
       persona,
       template,
-      instructions: this.ai.prompt,
+      prompt: this.ai.prompt,
       language,
     });
 
