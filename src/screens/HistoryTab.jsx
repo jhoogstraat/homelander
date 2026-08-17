@@ -120,7 +120,7 @@ function HistoryEntry({ listing, isExpanded, onToggle, onRetry, retrying, onSupp
 
   const badgeClass = isSent ? 'badge-success' : isDeactivated ? 'badge-deactivated' : isPremium ? 'badge-premium' : isDryRun ? '' : 'badge-fail';
   const safeDetail = listing.detail ? userErrorText(listing.detail, { operation: 'listing apply' }, t) : '';
-  const isFailure = !isSent && !isDeactivated && !isPremium && !isDryRun;
+  const isFailure = outcome === 'FAIL' && !isDeactivated && !isPremium;
   const rawDetail = isFailure && listing.detail ? redact(listing.detail) : '';
   const hasRawDetail = rawDetail && rawDetail !== safeDetail;
 
