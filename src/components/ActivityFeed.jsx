@@ -198,7 +198,8 @@ export default function ActivityFeed() {
         const isCaptcha = (item.detail || '').toLowerCase().includes('captcha')
           || failureReason.toLowerCase().includes('captcha');
         const safeDetail = item.detail ? userErrorText(item.detail, { operation: 'listing apply' }, t) : '';
-        const rawDetail = item.detail ? redact(item.detail) : '';
+        const isFailure = !isSent && !isDeactivated && !isPremium;
+        const rawDetail = isFailure && item.detail ? redact(item.detail) : '';
         const hasRawDetail = rawDetail && rawDetail !== safeDetail;
         const statusColor = isSent ? 'var(--success)' : isDeactivated ? 'var(--text-muted)' : isPremium ? '#a855f7' : 'var(--danger)';
         const statusIcon = isSent ? '✓' : isDeactivated ? '⊘' : isPremium ? '💎' : '✗';
