@@ -6,7 +6,7 @@ import { useLocale } from '../locales/LocaleContext';
 import { swallow } from '../shared/logCatch.js';
 import { useStore } from '../stores/appStore';
 import { ExternalLinkIcon, RetryIcon } from '../shared/Icons';
-import { userErrorText } from '../shared/userErrors';
+import { userErrorText, redact } from '../shared/userErrors';
 
 function formatTime(iso) {
   if (!iso) return '';
@@ -198,6 +198,8 @@ export default function ActivityFeed() {
         const isCaptcha = (item.detail || '').toLowerCase().includes('captcha')
           || failureReason.toLowerCase().includes('captcha');
         const safeDetail = item.detail ? userErrorText(item.detail, { operation: 'listing apply' }, t) : '';
+        const rawDetail = item.detail ? redact(item.detail) : '';
+        const hasRawDetail = rawDetail && rawDetail !== safeDetail;
         const statusColor = isSent ? 'var(--success)' : isDeactivated ? 'var(--text-muted)' : isPremium ? '#a855f7' : 'var(--danger)';
         const statusIcon = isSent ? '✓' : isDeactivated ? '⊘' : isPremium ? '💎' : '✗';
         const outcomeLabel = isSent ? t('livefeed.sent', 'Sent') : isDeactivated ? t('livefeed.deactivated', 'Deactivated') : isPremium ? t('livefeed.premium', 'Premium') : t('livefeed.failed', 'Failed');
@@ -358,6 +360,15 @@ export default function ActivityFeed() {
                   {safeDetail && (
                     <div className="col-span-2 mt-1">
                       <span style={{ color: 'var(--text-muted)' }}>{t('livefeed.detail', 'Detail:')} </span>
+                      {hasRawDetail && (
+                        <span
+                          className="text-xs"
+                          style={{ color: 'var(--text-muted)', cursor: 'help' }}
+                          title={rawDetail}
+                        >
+                          (ⓘ {t('livefeed.hoverForRaw', 'hover for full error')})
+                        </span>
+                      )}
                       <p
                         className="mt-0.5 p-2 rounded text-xs whitespace-pre-wrap"
                         style={{
@@ -367,7 +378,7 @@ export default function ActivityFeed() {
                           cursor: 'pointer',
                         }}
                         onClick={(e) => { e.stopPropagation(); handleCopy(safeDetail); }}
-                        title={t('livefeed.clickToCopy', 'Click to copy')}
+                        title={hasRawDetail ? rawDetail : t('livefeed.clickToCopy', 'Click to copy')}
                       >{safeDetail}</p>
                     </div>
                   )}

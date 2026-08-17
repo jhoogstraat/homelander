@@ -6,7 +6,7 @@ import { useLocale } from '../locales/LocaleContext';
 import { ExternalLinkIcon, RetryIcon } from '../shared/Icons';
 import { swallow } from '../shared/logCatch.js';
 import { useStore } from '../stores/appStore';
-import { userErrorText } from '../shared/userErrors';
+import { userErrorText, redact } from '../shared/userErrors';
 
 const PAGE_SIZE = 30;
 const OUTCOME_KEYS = [
@@ -120,6 +120,8 @@ function HistoryEntry({ listing, isExpanded, onToggle, onRetry, retrying, onSupp
 
   const badgeClass = isSent ? 'badge-success' : isDeactivated ? 'badge-deactivated' : isPremium ? 'badge-premium' : isDryRun ? '' : 'badge-fail';
   const safeDetail = listing.detail ? userErrorText(listing.detail, { operation: 'listing apply' }, t) : '';
+  const rawDetail = listing.detail ? redact(listing.detail) : '';
+  const hasRawDetail = rawDetail && rawDetail !== safeDetail;
 
   return (
     <div
@@ -301,6 +303,17 @@ function HistoryEntry({ listing, isExpanded, onToggle, onRetry, retrying, onSupp
             {safeDetail && (
               <div className="col-span-2 mt-1">
                 <span style={{ color: 'var(--text-muted)' }}>{t('history.detail', 'Detail:')} </span>
+                {hasRawDetail && (
+                  <span
+                    className="text-xs"
+                    style={{ color: 'var(--text-muted)', cursor: 'help' }}
+                    onMouseEnter={(e) => { e.stopPropagation(); onTipShow(rawDetail, e); }}
+                    onMouseMove={(e) => { e.stopPropagation(); onTipMove(e); }}
+                    onMouseLeave={onTipHide}
+                  >
+                    (ⓘ {t('history.hoverForRaw', 'hover for full error')})
+                  </span>
+                )}
                 <p
                   className="mt-0.5 p-2 rounded text-xs whitespace-pre-wrap"
                   style={{
@@ -315,7 +328,10 @@ function HistoryEntry({ listing, isExpanded, onToggle, onRetry, retrying, onSupp
                     setCopied(safeDetail);
                     setTimeout(() => setCopied(null), 1500);
                   }}
-                  title={t('history.clickToCopy', 'Click to copy')}
+                  onMouseEnter={hasRawDetail ? (e) => { e.stopPropagation(); onTipShow(rawDetail, e); } : undefined}
+                  onMouseMove={hasRawDetail ? (e) => { e.stopPropagation(); onTipMove(e); } : undefined}
+                  onMouseLeave={hasRawDetail ? onTipHide : undefined}
+                  title={hasRawDetail ? rawDetail : t('history.clickToCopy', 'Click to copy')}
                 >
                   {safeDetail}
                 </p>
