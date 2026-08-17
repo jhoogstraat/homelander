@@ -303,17 +303,6 @@ function HistoryEntry({ listing, isExpanded, onToggle, onRetry, retrying, onSupp
             {safeDetail && (
               <div className="col-span-2 mt-1">
                 <span style={{ color: 'var(--text-muted)' }}>{t('history.detail', 'Detail:')} </span>
-                {hasRawDetail && (
-                  <span
-                    className="text-xs"
-                    style={{ color: 'var(--text-muted)', cursor: 'help' }}
-                    onMouseEnter={(e) => { e.stopPropagation(); onTipShow(rawDetail, e); }}
-                    onMouseMove={(e) => { e.stopPropagation(); onTipMove(e); }}
-                    onMouseLeave={onTipHide}
-                  >
-                    (ⓘ {t('history.hoverForRaw', 'hover for full error')})
-                  </span>
-                )}
                 <p
                   className="mt-0.5 p-2 rounded text-xs whitespace-pre-wrap"
                   style={{
@@ -331,7 +320,7 @@ function HistoryEntry({ listing, isExpanded, onToggle, onRetry, retrying, onSupp
                   onMouseEnter={hasRawDetail ? (e) => { e.stopPropagation(); onTipShow(rawDetail, e); } : undefined}
                   onMouseMove={hasRawDetail ? (e) => { e.stopPropagation(); onTipMove(e); } : undefined}
                   onMouseLeave={hasRawDetail ? onTipHide : undefined}
-                  title={hasRawDetail ? rawDetail : t('history.clickToCopy', 'Click to copy')}
+                  title={hasRawDetail ? undefined : t('history.clickToCopy', 'Click to copy')}
                 >
                   {safeDetail}
                 </p>

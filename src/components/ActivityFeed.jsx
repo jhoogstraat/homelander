@@ -360,15 +360,6 @@ export default function ActivityFeed() {
                   {safeDetail && (
                     <div className="col-span-2 mt-1">
                       <span style={{ color: 'var(--text-muted)' }}>{t('livefeed.detail', 'Detail:')} </span>
-                      {hasRawDetail && (
-                        <span
-                          className="text-xs"
-                          style={{ color: 'var(--text-muted)', cursor: 'help' }}
-                          title={rawDetail}
-                        >
-                          (ⓘ {t('livefeed.hoverForRaw', 'hover for full error')})
-                        </span>
-                      )}
                       <p
                         className="mt-0.5 p-2 rounded text-xs whitespace-pre-wrap"
                         style={{
@@ -378,7 +369,10 @@ export default function ActivityFeed() {
                           cursor: 'pointer',
                         }}
                         onClick={(e) => { e.stopPropagation(); handleCopy(safeDetail); }}
-                        title={hasRawDetail ? rawDetail : t('livefeed.clickToCopy', 'Click to copy')}
+                        onMouseEnter={hasRawDetail ? (e) => { e.stopPropagation(); showTip(rawDetail, e); } : undefined}
+                        onMouseMove={hasRawDetail ? moveTip : undefined}
+                        onMouseLeave={hasRawDetail ? hideTip : undefined}
+                        title={hasRawDetail ? undefined : t('livefeed.clickToCopy', 'Click to copy')}
                       >{safeDetail}</p>
                     </div>
                   )}
