@@ -123,6 +123,7 @@ function HistoryEntry({ listing, isExpanded, onToggle, onRetry, retrying, onSupp
   const isError = outcome === 'ERROR';
   const rawDetail = isError && listing.detail ? redact(listing.detail) : '';
   const hasRawDetail = rawDetail && rawDetail !== safeDetail;
+  const detailCopyText = hasRawDetail ? `${safeDetail}\n\n${rawDetail}` : safeDetail;
 
   return (
     <div
@@ -308,14 +309,14 @@ function HistoryEntry({ listing, isExpanded, onToggle, onRetry, retrying, onSupp
                   className="mt-0.5 p-2 rounded text-xs whitespace-pre-wrap"
                   style={{
                     background: 'var(--bg-secondary)',
-                    color: copied === safeDetail ? 'var(--success)' : 'var(--text-secondary)',
+                    color: copied === detailCopyText ? 'var(--success)' : 'var(--text-secondary)',
                     border: '1px solid var(--border)',
                     cursor: 'pointer',
                   }}
                   onClick={(e) => {
                     e.stopPropagation();
-                    navigator.clipboard.writeText(safeDetail).catch((err) => { swallow(err, 'renderer/clipboard-detail'); });
-                    setCopied(safeDetail);
+                    navigator.clipboard.writeText(detailCopyText).catch((err) => { swallow(err, 'renderer/clipboard-detail'); });
+                    setCopied(detailCopyText);
                     setTimeout(() => setCopied(null), 1500);
                   }}
                   onMouseEnter={hasRawDetail ? (e) => { e.stopPropagation(); onTipShow(rawDetail, e); } : undefined}

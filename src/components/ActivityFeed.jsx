@@ -201,6 +201,7 @@ export default function ActivityFeed() {
         const safeDetail = item.detail ? userErrorText(item.detail, { operation: 'listing apply' }, t) : '';
         const rawDetail = isError && item.detail ? redact(item.detail) : '';
         const hasRawDetail = rawDetail && rawDetail !== safeDetail;
+        const detailCopyText = hasRawDetail ? `${safeDetail}\n\n${rawDetail}` : safeDetail;
         const statusColor = isSent ? 'var(--success)' : isDeactivated ? 'var(--text-muted)' : isPremium ? '#a855f7' : 'var(--danger)';
         const statusIcon = isSent ? '✓' : isDeactivated ? '⊘' : isPremium ? '💎' : '✗';
         const outcomeLabel = isSent ? t('livefeed.sent', 'Sent') : isDeactivated ? t('livefeed.deactivated', 'Deactivated') : isPremium ? t('livefeed.premium', 'Premium') : t('livefeed.failed', 'Failed');
@@ -365,11 +366,11 @@ export default function ActivityFeed() {
                         className="mt-0.5 p-2 rounded text-xs whitespace-pre-wrap"
                         style={{
                           background: 'var(--bg-secondary)',
-                          color: copied === safeDetail ? 'var(--success)' : 'var(--text-secondary)',
+                          color: copied === detailCopyText ? 'var(--success)' : 'var(--text-secondary)',
                           border: '1px solid var(--border)',
                           cursor: 'pointer',
                         }}
-                        onClick={(e) => { e.stopPropagation(); handleCopy(safeDetail); }}
+                        onClick={(e) => { e.stopPropagation(); handleCopy(detailCopyText); }}
                         onMouseEnter={hasRawDetail ? (e) => { e.stopPropagation(); showTip(rawDetail, e); } : undefined}
                         onMouseMove={hasRawDetail ? moveTip : undefined}
                         onMouseLeave={hasRawDetail ? hideTip : undefined}
