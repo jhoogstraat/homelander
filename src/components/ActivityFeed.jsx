@@ -7,6 +7,7 @@ import { swallow } from '../shared/logCatch.js';
 import { useStore } from '../stores/appStore';
 import { ExternalLinkIcon, RetryIcon } from '../shared/Icons';
 import { userErrorText, redact } from '../shared/userErrors';
+import { formatListingMeta } from '../shared/listingMeta';
 
 function formatTime(iso) {
   if (!iso) return '';
@@ -275,6 +276,11 @@ export default function ActivityFeed() {
                 {item.address && (
                   <p className="text-xs truncate mt-0.5" style={{ color: 'var(--text-muted)' }}>
                     {item.address}
+                  </p>
+                )}
+                {formatListingMeta(item.price, item.size) && (
+                  <p className="text-xs truncate mt-0.5" style={{ color: 'var(--text-muted)' }}>
+                    {formatListingMeta(item.price, item.size)}
                   </p>
                 )}
               </div>
