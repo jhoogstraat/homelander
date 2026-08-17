@@ -197,9 +197,9 @@ export default function ActivityFeed() {
           || failureReason.toLowerCase().includes('premium');
         const isCaptcha = (item.detail || '').toLowerCase().includes('captcha')
           || failureReason.toLowerCase().includes('captcha');
-        const isFailure = (item.outcome === 'FAIL' || item.outcome === 'ERROR') && !isDeactivated && !isPremium && !isCaptcha;
+        const isError = item.outcome === 'ERROR';
         const safeDetail = item.detail ? userErrorText(item.detail, { operation: 'listing apply' }, t) : '';
-        const rawDetail = isFailure && item.detail ? redact(item.detail) : '';
+        const rawDetail = isError && item.detail ? redact(item.detail) : '';
         const hasRawDetail = rawDetail && rawDetail !== safeDetail;
         const statusColor = isSent ? 'var(--success)' : isDeactivated ? 'var(--text-muted)' : isPremium ? '#a855f7' : 'var(--danger)';
         const statusIcon = isSent ? '✓' : isDeactivated ? '⊘' : isPremium ? '💎' : '✗';
