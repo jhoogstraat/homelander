@@ -197,8 +197,8 @@ export default function ActivityFeed() {
           || failureReason.toLowerCase().includes('premium');
         const isCaptcha = (item.detail || '').toLowerCase().includes('captcha')
           || failureReason.toLowerCase().includes('captcha');
+        const isFailure = (item.outcome === 'FAIL' || item.outcome === 'ERROR') && !isDeactivated && !isPremium && !isCaptcha;
         const safeDetail = item.detail ? userErrorText(item.detail, { operation: 'listing apply' }, t) : '';
-        const isFailure = item.outcome === 'FAIL' && !isDeactivated && !isPremium;
         const rawDetail = isFailure && item.detail ? redact(item.detail) : '';
         const hasRawDetail = rawDetail && rawDetail !== safeDetail;
         const statusColor = isSent ? 'var(--success)' : isDeactivated ? 'var(--text-muted)' : isPremium ? '#a855f7' : 'var(--danger)';
@@ -439,4 +439,3 @@ export default function ActivityFeed() {
     </div>
   );
 }
-
