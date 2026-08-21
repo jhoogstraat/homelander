@@ -93,6 +93,7 @@ if (process.platform === 'win32') {
 // Dynamic imports
 const { HomelanderDB } = await import('./db.js');
 const { IS24Contactor, DEBUG } = await import('./is24-contactor.js');
+const { isCdpFatalError } = await import('./cdp-limits.js');
 const { fetchListings } = await import('./url-translator.js');
 
 // ── Helpers ────────────────────────────────────────────────────
@@ -214,6 +215,16 @@ let lastTick = Date.now();
 // consecutive CDP connect failures — escalate to Electron after threshold
 let cdpFailCount = 0;
 
+/**
+ * How many times a listing may be re-queued after a transient CDP failure
+ * before it is recorded as a terminal ERROR.
+ *
+ * Enough to ride out a renderer hiccup and a Chrome restart; few enough that a
+ * listing which reliably breaks the browser surfaces in History instead of
+ * spinning at the head of the queue forever.
+ */
+const MAX_TRANSIENT_APPLY_ATTEMPTS = 3;
+
 // Mutable config — all fields hot-reload without restart
 let currentConfig = null;
 
@@ -281,6 +292,13 @@ async function ensureNachrichtenSync(db) {
   } catch (err) {
     log(`Nachrichten pre-flight error: ${err.message}`);
     emit({ type: 'nachrichten_sync_error', error: err.message });
+    // A broken renderer would fail this pre-flight forever, and the apply loop
+    // only reconnects when the contactor looks disconnected — which it doesn't
+    // when the transport is up but commands go unanswered.  Drop it explicitly.
+    if (isCdpFatalError(err)) {
+      log('  Nachrichten pre-flight hit a CDP failure — dropping contactor for reconnect');
+      contactor = null;
+    }
     // Fail closed: do not apply until a later loop/resume can complete the sync.
     return false;
   } finally {
@@ -425,29 +443,35 @@ async function applyOne(listing, filterId, db) {
       });
     }
   } catch (err) {
-    const errMsg = err?.message || String(err);
+    let errMsg = err?.message || String(err);
     log(`  ERROR | ${listing.expose_id} | ${errMsg}`);
 
     // CDP/browser infrastructure failures before confirmed submit are transient.
     // Put the listing back in the queue instead of burning it as a terminal FAIL.
-    const cdpFatal = /Target closed|Session closed|Protocol error|WebSocket is not open|Connection closed|Detached from target|Browser has been disconnected|timed out|protocolTimeout/i;
-    const isCdpFatal = cdpFatal.test(errMsg) || (contactor?.browser && !contactor.browser.isConnected());
+    // apply() rethrows these rather than folding them into a reason string, so
+    // this branch is what actually recovers a broken renderer.
+    const isCdpFatal = isCdpFatalError(err) || (contactor?.browser && !contactor.browser.isConnected());
     if (isCdpFatal) {
-      log('  CDP connection lost — re-queueing listing and nulling contactor for reconnect');
-      db.db.prepare(`
-        UPDATE listings
-        SET status = 'seen', outcome = NULL, detail = NULL,
-          failure_reason = NULL, sent_at = NULL
-        WHERE hash = ? AND status = 'processing'
-      `).run(listing.hash);
+      // The contactor is dropped either way — the browser needs reconnecting
+      // regardless of what happens to this particular listing.
       contactor = null;
-      emit({
-        type: 'transient_apply_error',
-        exposeId: listing.expose_id,
-        title: listing.title,
-        detail: errMsg,
-      });
-      return;
+      const { attempts } = db.requeueForRetry(listing.hash);
+      if (attempts < MAX_TRANSIENT_APPLY_ATTEMPTS) {
+        log(`  CDP connection lost — re-queued ${listing.expose_id} (attempt ${attempts}/${MAX_TRANSIENT_APPLY_ATTEMPTS}), nulling contactor for reconnect`);
+        emit({
+          type: 'transient_apply_error',
+          exposeId: listing.expose_id,
+          title: listing.title,
+          detail: errMsg,
+          attempts,
+          maxAttempts: MAX_TRANSIENT_APPLY_ATTEMPTS,
+        });
+        return;
+      }
+      // Out of retries. Fall through and burn it as a terminal ERROR so it
+      // surfaces in History instead of spinning at the head of the queue.
+      log(`  CDP failure persisted for ${listing.expose_id} after ${attempts} attempts — recording as ERROR`);
+      errMsg = `${errMsg} (${attempts} attempts)`;
     }
 
     db.markSent(listing.hash, 'ERROR', `ERROR: ${errMsg}`, 'error');

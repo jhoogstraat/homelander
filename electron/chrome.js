@@ -9,6 +9,7 @@ import { homedir } from 'node:os';
 import { spawn, execSync } from 'node:child_process';
 import { app } from 'electron';
 import puppeteer from 'puppeteer';
+import { CDP_PROTOCOL_TIMEOUT_MS } from '../engine/cdp-limits.js';
 
 const CDP_PORT = 9222;
 const DEFAULT_MAX_TABS = 5;
@@ -181,6 +182,7 @@ export class ChromeManager {
       headless: false,
       defaultViewport: null,
       userDataDir: this.profileDir,
+      protocolTimeout: CDP_PROTOCOL_TIMEOUT_MS,
       ignoreDefaultArgs: ['--enable-automation'],
       args: [
         `--remote-debugging-port=${CDP_PORT}`,
@@ -265,7 +267,7 @@ export class ChromeManager {
 
   async _connectExisting() {
     if (this.browser?.isConnected?.()) return this.browser;
-    this.browser = await puppeteer.connect({ browserURL: this.cdpUrl, defaultViewport: null });
+    this.browser = await puppeteer.connect({ browserURL: this.cdpUrl, defaultViewport: null, protocolTimeout: CDP_PROTOCOL_TIMEOUT_MS });
     this.browser.on('disconnected', () => { this.browser = null; });
 
     // Spoof navigator.webdriver on all existing + future pages.
@@ -617,7 +619,7 @@ export class ChromeManager {
       if (this.browser?.isConnected?.()) {
         await this.browser.close();
       } else if (await this.isHealthy()) {
-        const browser = await puppeteer.connect({ browserURL: this.cdpUrl, defaultViewport: null });
+        const browser = await puppeteer.connect({ browserURL: this.cdpUrl, defaultViewport: null, protocolTimeout: CDP_PROTOCOL_TIMEOUT_MS });
         await browser.close();
       }
     } catch (err) { swallow(err, 'shutdown'); }

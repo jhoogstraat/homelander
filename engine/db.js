@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { join, dirname } from 'node:path';
 import { mkdirSync } from 'node:fs';
 
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -46,7 +46,10 @@ CREATE TABLE IF NOT EXISTS listings (
   sent_at TEXT,
   outcome TEXT,
   failure_reason TEXT,
-  detail TEXT
+  detail TEXT,
+  -- Transient CDP failures put a listing back in the queue; this counts those
+  -- so a listing that keeps breaking the browser cannot retry forever.
+  apply_attempts INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS results (
@@ -99,6 +102,13 @@ export class HomelanderDB {
       if (version && version.version < 4) {
         try {
           this.db.exec('ALTER TABLE filters ADD COLUMN first_poll_done INTEGER NOT NULL DEFAULT 0');
+        } catch {
+          // Column already exists (first-run via SCHEMA) — ignore
+        }
+      }
+      if (version && version.version < 6) {
+        try {
+          this.db.exec('ALTER TABLE listings ADD COLUMN apply_attempts INTEGER NOT NULL DEFAULT 0');
         } catch {
           // Column already exists (first-run via SCHEMA) — ignore
         }
@@ -255,8 +265,28 @@ export class HomelanderDB {
       sql += ' AND filter_id = ?';
       params.push(filterId);
     }
-    sql += ' ORDER BY discovered_at ASC';
+    // Fewest attempts first: a listing that was re-queued after a transient
+    // failure goes behind fresh ones instead of blocking the head of the queue
+    // (it keeps its original discovered_at, so date order alone would pin it
+    // at position 0 forever).
+    sql += ' ORDER BY apply_attempts ASC, discovered_at ASC';
     return this.db.prepare(sql).all(...params);
+  }
+
+  /**
+   * Put a listing back in the queue after a transient failure and count the
+   * attempt.  Returns the new attempt total so the caller can stop retrying.
+   */
+  requeueForRetry(hash) {
+    const info = this.db.prepare(`
+      UPDATE listings
+      SET status = 'seen', outcome = NULL, detail = NULL,
+        failure_reason = NULL, sent_at = NULL,
+        apply_attempts = apply_attempts + 1
+      WHERE hash = ? AND status = 'processing'
+    `).run(hash);
+    const row = this.db.prepare('SELECT apply_attempts FROM listings WHERE hash = ?').get(hash);
+    return { requeued: info.changes > 0, attempts: row?.apply_attempts ?? 0 };
   }
 
   clearQueue(filterId) {
@@ -338,8 +368,8 @@ export class HomelanderDB {
     if (!row) return { error: 'Listing not found' };
     if (row.status === 'seen') return { hash: row.hash, already_seen: true };
     this.db.prepare(`
-      UPDATE listings SET status = 'seen', outcome = NULL, detail = NULL, 
-        failure_reason = NULL, sent_at = NULL
+      UPDATE listings SET status = 'seen', outcome = NULL, detail = NULL,
+        failure_reason = NULL, sent_at = NULL, apply_attempts = 0
       WHERE hash = ?
     `).run(row.hash);
     return { hash: row.hash };
@@ -351,7 +381,7 @@ export class HomelanderDB {
    *  SESSION_EXPIRED, excluding premium/deactivated reasons. */
   retryAllFailed(filterId = null) {
     let sql = `UPDATE listings SET status = 'seen', outcome = NULL, detail = NULL,
-      failure_reason = NULL, sent_at = NULL
+      failure_reason = NULL, sent_at = NULL, apply_attempts = 0
       WHERE outcome IN ('FAIL', 'ERROR', 'SUBMIT_FAILED', 'SESSION_EXPIRED', 'CAPTCHA')
       AND (detail IS NULL OR (detail NOT LIKE '%premium%' AND detail NOT LIKE '%deactivated%'))
       AND (failure_reason IS NULL OR (failure_reason NOT LIKE '%premium%' AND failure_reason NOT LIKE '%deactivated%'))`;

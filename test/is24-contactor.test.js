@@ -5,6 +5,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { IS24Contactor, extractExposeIdsFromText } from '../engine/is24-contactor.js';
+import { isCdpFatalError } from '../engine/cdp-limits.js';
 
 /** Create a contactor with a mocked page. */
 function mockContactor() {
@@ -15,6 +16,7 @@ function mockContactor() {
     close: async () => {},
     isClosed: () => false,
     title: async () => '',
+    on: () => {},                // dialog auto-dismiss handler registration
   };
   return c;
 }
@@ -445,5 +447,126 @@ describe('_verifySubmission() — deadline timeout', () => {
     const r = await c._verifySubmission();
     assert.equal(r.verified, false);
     assert.match(r.detail, /no confirmation/);
+  });
+});
+
+// ============================================================================
+// CDP failure handling
+//
+// Regression cover for the "Runtime.callFunctionOn timed out" class of bug:
+// a hung CDP command used to be swallowed into an `ERROR:` reason string,
+// which the daemon treats as terminal — burning the listing and leaving the
+// broken contactor in place for every listing after it.
+// ============================================================================
+
+const PROTOCOL_TIMEOUT_MSG =
+  "Runtime.callFunctionOn timed out. Increase the 'protocolTimeout' setting in "
+  + 'launch/connect calls for a higher timeout if needed.';
+
+describe('isCdpFatalError() — transient vs terminal', () => {
+  it('classifies protocol timeouts and dead transports as fatal', () => {
+    for (const msg of [
+      PROTOCOL_TIMEOUT_MSG,
+      'Page.captureScreenshot timed out.',
+      'Protocol error (Runtime.callFunctionOn): Target closed.',
+      'Session closed. Most likely the page has been closed.',
+      'Execution context was destroyed, most likely because of a navigation.',
+      'Navigation failed because browser has been disconnected!',
+    ]) {
+      assert.equal(isCdpFatalError(new Error(msg)), true, msg);
+    }
+  });
+
+  it('leaves ordinary page-level failures alone', () => {
+    for (const msg of [
+      'No node found for selector: input[name="firstName"]',
+      'Navigation timeout of 20000 ms exceeded',
+      'net::ERR_NAME_NOT_RESOLVED',
+    ]) {
+      assert.equal(isCdpFatalError(new Error(msg)), false, msg);
+    }
+  });
+});
+
+describe('pingRenderer() — zombie renderer detection', () => {
+  it('reports the renderer dead when it stops answering, within its budget', async () => {
+    const c = mockContactor();
+    c.page.evaluate = () => new Promise(() => {});  // never resolves
+
+    const started = Date.now();
+    const alive = await c.pingRenderer(50);
+    const elapsed = Date.now() - started;
+
+    assert.equal(alive, false);
+    assert.ok(elapsed < 2000, `pingRenderer() took ${elapsed}ms — its timeout is not being applied`);
+  });
+
+  it('reports the renderer alive when it answers', async () => {
+    const c = mockContactor();
+    c.page.evaluate = async () => 1;
+    assert.equal(await c.pingRenderer(50), true);
+  });
+});
+
+describe('apply() — CDP failures are transient, not terminal', () => {
+  function contactorThatFailsWith(message) {
+    const c = mockContactor();
+    c.browser = { isConnected: () => true };
+    c.page.url = () => 'about:blank';
+    c.page.waitForNavigation = async () => {};
+    c.page.evaluate = async () => { throw new Error(message); };
+    return c;
+  }
+
+  it('rethrows a protocol timeout so the daemon can re-queue and reconnect', async () => {
+    const c = contactorThatFailsWith(PROTOCOL_TIMEOUT_MSG);
+    await assert.rejects(
+      () => c.apply('170125081', 'hallo', '', 5, {}),
+      (err) => isCdpFatalError(err),
+    );
+  });
+
+  it('names the step that hung, so the log points at a call site', async () => {
+    const c = contactorThatFailsWith(PROTOCOL_TIMEOUT_MSG);
+    await assert.rejects(
+      () => c.apply('170125081', 'hallo', '', 5, {}),
+      /\[step: apply\(170125081\) › navigate\/assign-location, \d+ms\]/,
+    );
+  });
+
+  it('still returns a terminal ERROR result for ordinary page failures', async () => {
+    const c = contactorThatFailsWith('No node found for selector: #nope');
+    const result = await c.apply('170125081', 'hallo', '', 5, {});
+    assert.equal(result.success, false);
+    assert.match(result.reason, /^ERROR: No node found/);
+  });
+});
+
+describe('_installDialogHandler() — unhandled dialogs block the renderer', () => {
+  it('registers a dismisser and dismisses what arrives', async () => {
+    const c = mockContactor();
+    const handlers = {};
+    let dismissed = false;
+    c.page.on = (event, fn) => { handlers[event] = fn; };
+
+    c._installDialogHandler(c.page);
+    assert.equal(typeof handlers.dialog, 'function', 'no dialog handler registered');
+
+    handlers.dialog({
+      type: () => 'beforeunload',
+      message: () => 'Änderungen gehen verloren',
+      dismiss: async () => { dismissed = true; },
+    });
+    await new Promise((r) => setImmediate(r));
+    assert.equal(dismissed, true);
+  });
+
+  it('registers only once per page', () => {
+    const c = mockContactor();
+    let registrations = 0;
+    c.page.on = () => { registrations++; };
+    c._installDialogHandler(c.page);
+    c._installDialogHandler(c.page);
+    assert.equal(registrations, 1);
   });
 });

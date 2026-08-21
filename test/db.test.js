@@ -88,7 +88,7 @@ describe('HomelanderDB constructor', () => {
   it('records schema version', () => {
     const db = freshDB();
     const row = db.db.prepare('SELECT version FROM schema_version').get();
-    assert.equal(row.version, 5);
+    assert.equal(row.version, 6);
     db.close();
   });
 
@@ -148,7 +148,64 @@ describe('HomelanderDB constructor', () => {
       const db = new HomelanderDB(file);
       assert.equal(db.getFilter('old-polled').first_poll_done, 1);
       assert.equal(db.getFilter('old-new').first_poll_done, 0);
-      assert.equal(db.db.prepare('SELECT version FROM schema_version').get().version, 5);
+      assert.equal(db.db.prepare('SELECT version FROM schema_version').get().version, 6);
+      db.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('migrates a v5 DB by adding apply_attempts, defaulting existing rows to 0', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'homelander-db-migration-'));
+    const file = join(dir, 'homelander.db');
+    try {
+      const old = new Database(file);
+      old.exec(`
+        CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+        INSERT INTO schema_version (version) VALUES (5);
+        CREATE TABLE filters (
+          id TEXT PRIMARY KEY,
+          name TEXT,
+          web_url TEXT NOT NULL,
+          mobile_params TEXT NOT NULL,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          archived INTEGER NOT NULL DEFAULT 0,
+          first_poll_done INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT DEFAULT (datetime('now')),
+          last_polled_at TEXT,
+          total_seen INTEGER DEFAULT 0
+        );
+        CREATE TABLE listings (
+          hash TEXT PRIMARY KEY,
+          expose_id TEXT NOT NULL,
+          title TEXT,
+          price INTEGER,
+          size REAL,
+          rooms REAL,
+          address TEXT,
+          image_url TEXT,
+          filter_id TEXT,
+          status TEXT NOT NULL DEFAULT 'seen',
+          discovered_at TEXT DEFAULT (datetime('now')),
+          sent_at TEXT,
+          outcome TEXT,
+          detail TEXT,
+          failure_reason TEXT DEFAULT ''
+        );
+        INSERT INTO filters (id, name, web_url, mobile_params) VALUES ('f1', 'F', 'https://example.com', '{}');
+        INSERT INTO listings (hash, expose_id, title, price, filter_id, status)
+        VALUES ('h1', '999', 'Pre-existing', 700, 'f1', 'seen');
+      `);
+      old.close();
+
+      const db = new HomelanderDB(file);
+      const row = db.db.prepare('SELECT apply_attempts FROM listings WHERE hash = ?').get('h1');
+      assert.equal(row.apply_attempts, 0, 'existing rows must start with a full retry budget');
+      assert.equal(db.db.prepare('SELECT version FROM schema_version').get().version, 6);
+
+      // And the new column is usable straight away.
+      db.db.prepare("UPDATE listings SET status = 'processing' WHERE hash = 'h1'").run();
+      assert.equal(db.requeueForRetry('h1').attempts, 1);
       db.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -1116,5 +1173,98 @@ describe('close', () => {
     assert.throws(() => {
       db.db.prepare('SELECT 1').get();
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Transient retry accounting
+//
+// A CDP failure puts the listing back in the queue rather than burning it, so
+// the retry has to be counted — otherwise a listing that reliably breaks the
+// browser spins at the head of the queue forever and blocks everything behind
+// it (re-queued rows keep their original discovered_at).
+// ---------------------------------------------------------------------------
+
+describe('requeueForRetry() — transient CDP failures', () => {
+  it('returns the listing to the queue and counts the attempt', () => {
+    const db = seededDB();
+    const hash = seedListing(db);
+    db.db.prepare("UPDATE listings SET status = 'processing' WHERE hash = ?").run(hash);
+
+    const first = db.requeueForRetry(hash);
+    assert.equal(first.requeued, true);
+    assert.equal(first.attempts, 1);
+
+    const row = db.db.prepare('SELECT status, outcome, sent_at FROM listings WHERE hash = ?').get(hash);
+    assert.equal(row.status, 'seen');
+    assert.equal(row.outcome, null);
+    assert.equal(row.sent_at, null);
+  });
+
+  it('accumulates across attempts so the caller can cap them', () => {
+    const db = seededDB();
+    const hash = seedListing(db);
+    const seen = [];
+    for (let i = 0; i < 3; i++) {
+      db.db.prepare("UPDATE listings SET status = 'processing' WHERE hash = ?").run(hash);
+      seen.push(db.requeueForRetry(hash).attempts);
+    }
+    assert.deepEqual(seen, [1, 2, 3]);
+  });
+
+  it('does not count an attempt when the listing is not being processed', () => {
+    const db = seededDB();
+    const hash = seedListing(db);  // still 'seen', never claimed
+    const result = db.requeueForRetry(hash);
+    assert.equal(result.requeued, false);
+    assert.equal(result.attempts, 0);
+  });
+});
+
+describe('getSeenListings() — retried listings do not block the queue', () => {
+  it('orders fewest attempts first, then oldest first', () => {
+    const db = seededDB();
+    const older = seedListing(db, { expose_id: '111', price: 100 });
+    const newer = seedListing(db, { expose_id: '222', price: 200 });
+    db.db.prepare("UPDATE listings SET discovered_at = '2026-01-01T00:00:00Z' WHERE hash = ?").run(older);
+    db.db.prepare("UPDATE listings SET discovered_at = '2026-06-01T00:00:00Z' WHERE hash = ?").run(newer);
+
+    // Oldest first while both are untried.
+    assert.deepEqual(db.getSeenListings('f1').map((l) => l.expose_id), ['111', '222']);
+
+    // After the older one fails transiently it must yield to the fresh one.
+    db.db.prepare("UPDATE listings SET status = 'processing' WHERE hash = ?").run(older);
+    db.requeueForRetry(older);
+    assert.deepEqual(db.getSeenListings('f1').map((l) => l.expose_id), ['222', '111']);
+  });
+});
+
+describe('manual retry resets the transient attempt budget', () => {
+  it('retryListing() clears apply_attempts', () => {
+    const db = seededDB();
+    const hash = seedListing(db, { expose_id: '333' });
+    db.db.prepare("UPDATE listings SET status = 'processing' WHERE hash = ?").run(hash);
+    db.requeueForRetry(hash);
+    db.markSent(hash, 'ERROR', 'ERROR: Runtime.callFunctionOn timed out.', 'error');
+
+    db.retryListing('333');
+
+    const row = db.db.prepare('SELECT apply_attempts, status FROM listings WHERE hash = ?').get(hash);
+    assert.equal(row.apply_attempts, 0);
+    assert.equal(row.status, 'seen');
+  });
+
+  it('retryAllFailed() clears apply_attempts', () => {
+    const db = seededDB();
+    const hash = seedListing(db, { expose_id: '444' });
+    db.db.prepare("UPDATE listings SET status = 'processing' WHERE hash = ?").run(hash);
+    db.requeueForRetry(hash);
+    db.markSent(hash, 'ERROR', 'ERROR: Runtime.callFunctionOn timed out.', 'error');
+
+    db.retryAllFailed('f1');
+
+    const row = db.db.prepare('SELECT apply_attempts, status FROM listings WHERE hash = ?').get(hash);
+    assert.equal(row.apply_attempts, 0);
+    assert.equal(row.status, 'seen');
   });
 });

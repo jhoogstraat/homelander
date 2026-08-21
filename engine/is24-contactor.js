@@ -7,6 +7,7 @@ import puppeteer from 'puppeteer';
 import { mkdirSync, existsSync, writeFileSync, readdirSync, unlinkSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { CDP_PROTOCOL_TIMEOUT_MS, isCdpFatalError } from './cdp-limits.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const IS24_EXPOSE_URL = 'https://www.immobilienscout24.de/expose';
@@ -45,6 +46,17 @@ export const DEBUG = {
 function swallow(err, context, logFn = console.error) {
   try { logFn(`[swallow] ${context}: ${err?.message || err}`); } catch {}
 }
+
+/** A CDP step slower than this is logged even when its error is swallowed. */
+const SLOW_CDP_STEP_MS = 10_000;
+
+/**
+ * Wall-clock budget for the in-page Messenger scrape.  Must stay under
+ * CDP_PROTOCOL_TIMEOUT_MS: the scrape runs inside one `Runtime.callFunctionOn`
+ * with awaitPromise, so an in-page fetch that never settles would otherwise
+ * hang the whole command.
+ */
+const MESSENGER_SCRAPE_BUDGET_MS = 20_000;
 
 
 /**
@@ -158,14 +170,75 @@ export class IS24Contactor {
    * renderer is responsive, false if it's a zombie (GPU compositor
    * deadlock, WebSocket open but CDP commands never resolve).
    */
-  async pingRenderer() {
+  async pingRenderer(timeoutMs = 5000) {
     if (!this.page || this.page.isClosed()) return false;
+    // page.evaluate() takes (pageFunction, ...args) — it has no options
+    // parameter, so an options object here would silently become an argument
+    // and the call would run to the full protocolTimeout.  Race a timer.
+    let timer;
+    const deadline = new Promise((resolve) => { timer = setTimeout(() => resolve('timeout'), timeoutMs); });
     try {
-      await this.page.evaluate(() => 1, { timeout: 5000 });
-      return true;
-    } catch {
+      const outcome = await Promise.race([
+        this.page.evaluate(() => 1).then(() => 'alive', (err) => err),
+        deadline,
+      ]);
+      if (outcome === 'alive') return true;
+      if (outcome === 'timeout') swallow(new Error(`no response in ${timeoutMs}ms`), 'contactor/ping-renderer');
+      else swallow(outcome, 'contactor/ping-renderer');
       return false;
+    } finally {
+      clearTimeout(timer);
     }
+  }
+
+  /**
+   * Run one CDP step under a breadcrumb.
+   *
+   * Two jobs: annotate CDP failures with the step that was in flight (the raw
+   * "Runtime.callFunctionOn timed out" says nothing about which call site
+   * hung), and log any step that runs long even when its own error is
+   * swallowed — several helpers below return false on failure, which would
+   * otherwise hide a 30s hang completely.
+   */
+  async _cdpStep(label, fn) {
+    const parent = this._currentStep;
+    const path = parent ? `${parent} › ${label}` : label;
+    this._currentStep = path;
+    const started = Date.now();
+    try {
+      return await fn();
+    } catch (err) {
+      // Innermost step wins — don't re-annotate as the error unwinds.
+      if (isCdpFatalError(err) && err?.message && !err.message.includes('[step:')) {
+        err.message = `${err.message} [step: ${path}, ${Date.now() - started}ms]`;
+      }
+      throw err;
+    } finally {
+      const elapsed = Date.now() - started;
+      if (elapsed >= SLOW_CDP_STEP_MS) {
+        try { console.error(`[slow-cdp] ${path}: ${elapsed}ms`); } catch {}
+      }
+      this._currentStep = parent;
+    }
+  }
+
+  /**
+   * Auto-dismiss JavaScript dialogs on the automation page.
+   *
+   * Puppeteer only emits a `dialog` event; with no listener the dialog stays
+   * open and the renderer main thread is blocked indefinitely, so every
+   * subsequent CDP command runs to the protocol timeout.  A beforeunload
+   * prompt on a half-filled contact form is enough to trigger it.
+   */
+  _installDialogHandler(page) {
+    if (!page || page.__homelanderDialogHandler) return;
+    page.__homelanderDialogHandler = true;
+    page.on('dialog', (dialog) => {
+      const type = dialog.type();
+      const message = (dialog.message() || '').slice(0, 120);
+      console.error(`[dialog] auto-dismissing ${type}: ${message}`);
+      dialog.dismiss().catch((err) => { swallow(err, 'contactor/dialog-dismiss'); });
+    });
   }
 
   /** Hot-reload timing speed/overrides without restarting. */
@@ -193,6 +266,7 @@ export class IS24Contactor {
     this.browser = await puppeteer.connect({
       browserWSEndpoint: webSocketDebuggerUrl,
       defaultViewport: null,
+      protocolTimeout: CDP_PROTOCOL_TIMEOUT_MS,
     });
     // Pre-create one persistent background page for all applies.
     // Reusing it avoids the OS-level app activation that newPage() triggers.
@@ -256,8 +330,12 @@ export class IS24Contactor {
 
   /** Get or create the single persistent background page. */
   async _ensurePage() {
-    if (this.page && !this.page.isClosed()) return this.page;
+    if (this.page && !this.page.isClosed()) {
+      this._installDialogHandler(this.page);
+      return this.page;
+    }
     this.page = await this.browser.newPage();
+    this._installDialogHandler(this.page);
     // Use default window position — no off-screen shenanigans
     await this._setWindowBounds(this.page);
     // newPage() already returns a page at about:blank — no navigation needed.
@@ -275,8 +353,9 @@ export class IS24Contactor {
     // navigate to about:blank from about:blank is a no-op
     if (url === 'about:blank' && this.page?.url() === 'about:blank') return;
     const nav = this.page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout });
-    await this.page.evaluate((u) => { window.location.href = u; }, url);
-    await nav;
+    await this._cdpStep('navigate/assign-location', () =>
+      this.page.evaluate((u) => { window.location.href = u; }, url));
+    await this._cdpStep('navigate/await-commit', () => nav);
 
     // Reapply lifecycle state after navigation — Chromium resets it.
     const cdpClient = await this.page.target().createCDPSession();
@@ -313,9 +392,11 @@ export class IS24Contactor {
     let fieldCount = 0;
     let fieldRetries = 0;
     let perimeterCaptcha = false; // flag for finally-block cleanup skip
+    let cdpFatal = false;         // flag for finally-block cleanup skip
 
     this.page = await this._ensurePage();
     this._captchaAttempts = 0;
+    this._currentStep = `apply(${exposeId})`;
 
     // Let Chromium report its natural User-Agent and sec-ch-ua headers.
     // Spoofing "Chrome for Testing" to a retail brand was causing more
@@ -332,12 +413,12 @@ export class IS24Contactor {
 
       // Detect AWS WAF perimeter captcha (Ich bin kein Roboter)
       try {
-        const isCaptcha = await this.page.evaluate(() => {
+        const isCaptcha = await this._cdpStep('perimeter-captcha-check', () => this.page.evaluate(() => {
           if (document.title.includes('Ich bin kein Roboter')) return true;
           if (document.querySelector('#captcha-container')) return true;
           if (typeof window.awsWafCaptcha !== 'undefined') return true;
           return false;
-        });
+        }));
         if (isCaptcha) {
           perimeterCaptcha = true;
           const ssDir = DEBUG.screenshotDir();
@@ -348,14 +429,14 @@ export class IS24Contactor {
             fields_typed: 0, field_retries: 0,
           };
         }
-      } catch (err) { swallow(err, 'apply/perimeter-captcha-check'); }
+      } catch (err) { if (isCdpFatalError(err)) throw err; swallow(err, 'apply/perimeter-captcha-check'); }
 
       // Check IS24.expose.userLoggedIn on the freshly loaded page
       try {
-        const loggedIn = await this.page.evaluate(() => {
+        const loggedIn = await this._cdpStep('session-flag-check', () => this.page.evaluate(() => {
           const flag = (window.IS24 && window.IS24.expose && window.IS24.expose.userLoggedIn);
           return typeof flag === 'boolean' ? flag : null;
-        });
+        }));
         if (loggedIn === false) {
           const ssDir = DEBUG.screenshotDir();
           try { await this.page.screenshot({ path: join(ssDir, `${exposeId}_session_expired.png`), fullPage: true }); } catch (err) { swallow(err, 'screenshot/session_expired'); }
@@ -365,7 +446,7 @@ export class IS24Contactor {
             fields_typed: 0, field_retries: 0,
           };
         }
-      } catch (err) { swallow(err, 'apply/session-expiry-url-check'); }
+      } catch (err) { if (isCdpFatalError(err)) throw err; swallow(err, 'apply/session-expiry-url-check'); }
 
       // Detect session expiry: IS24 redirects unauthenticated users to login
       try {
@@ -382,7 +463,7 @@ export class IS24Contactor {
             fields_typed: 0, field_retries: 0,
           };
         }
-      } catch (err) { swallow(err, 'apply/loggedout-session-check'); }
+      } catch (err) { if (isCdpFatalError(err)) throw err; swallow(err, 'apply/loggedout-session-check'); }
 
       const loggedOutSession = await this._isLoggedOutSession();
       if (loggedOutSession) {
@@ -408,15 +489,16 @@ export class IS24Contactor {
       }
 
       const tForm = Date.now();
-      await this._openContactFormIfNeeded();
-      const formReady = await this._waitForForm(this.t.formWaitTimeout);
+      await this._cdpStep('open-contact-form', () => this._openContactFormIfNeeded());
+      const formReady = await this._cdpStep('wait-for-form', () => this._waitForForm(this.t.formWaitTimeout));
       timing.form_wait_ms = Date.now() - tForm;
 
       if (!formReady) {
-        const premium = await this._isPremiumListing();
+        const premium = await this._cdpStep('premium-check', () => this._isPremiumListing());
         formState = premium ? 'premium_upsell' : 'no_form';
         const ssDir = DEBUG.screenshotDir();
-        await this.page.screenshot({ path: join(ssDir, `${exposeId}_${formState}.png`), fullPage: true });
+        await this._cdpStep('screenshot/no-form', () =>
+          this.page.screenshot({ path: join(ssDir, `${exposeId}_${formState}.png`), fullPage: true }));
         return {
           success: false, reason: premium
             ? 'PREMIUM_ONLY (Nachricht opened a Plus/Suchen+ upsell instead of the contact form)'
@@ -427,21 +509,21 @@ export class IS24Contactor {
       }
 
       const tFill = Date.now();
-      let fillResult = await this._fillForm(message);
+      let fillResult = await this._cdpStep('fill-form', () => this._fillForm(message));
       timing.fill_ms = Date.now() - tFill;
       fieldCount = fillResult.filled;
       fieldRetries = fillResult.retries;
 
-      let formStillOpen = await this._isContactFormOpen();
+      let formStillOpen = await this._cdpStep('form-still-open', () => this._isContactFormOpen());
       if (!formStillOpen) {
         // Some IS24 variants close/return to the expose page during SPA transitions.
         // If a visible "Nachricht" contact button is present, reopen, refill once, then submit.
-        const reopened = await this._openContactFormIfNeeded();
-        if (reopened && await this._waitForForm(Math.min(this.t.formWaitTimeout, 10_000))) {
-          const refillResult = await this._fillForm(message);
+        const reopened = await this._cdpStep('reopen-contact-form', () => this._openContactFormIfNeeded());
+        if (reopened && await this._cdpStep('reopen/wait-for-form', () => this._waitForForm(Math.min(this.t.formWaitTimeout, 10_000)))) {
+          const refillResult = await this._cdpStep('refill-form', () => this._fillForm(message));
           fieldCount += refillResult.filled;
           fieldRetries += refillResult.retries;
-          formStillOpen = await this._isContactFormOpen();
+          formStillOpen = await this._cdpStep('refill/form-still-open', () => this._isContactFormOpen());
         }
       }
       if (!formStillOpen) {
@@ -462,7 +544,7 @@ export class IS24Contactor {
         };
       }
 
-      await this._clickAbschicken();
+      await this._cdpStep('submit', () => this._clickAbschicken());
 
       const tVerify = Date.now();
       let verificationResult;
@@ -470,7 +552,7 @@ export class IS24Contactor {
       const MAX_SUBMIT_RETRIES = 2;
 
       while (submitRetries <= MAX_SUBMIT_RETRIES) {
-        verificationResult = await this._verifySubmission(exposeId, captcha);
+        verificationResult = await this._cdpStep(`verify-submission#${submitRetries}`, () => this._verifySubmission(exposeId, captcha));
         const { verified, detail } = verificationResult;
 
         if (verified) break;
@@ -491,7 +573,7 @@ export class IS24Contactor {
           submitRetries++;
           process.stderr.write(`[contactor] Submit retry #${submitRetries} — re-filling fields and re-submitting\n`);
           // Re-fill fields that IS24's React validation may have cleared
-          fillResult = await this._fillForm(message);
+          fillResult = await this._cdpStep(`retry#${submitRetries}/fill-form`, () => this._fillForm(message));
           fieldCount += fillResult.filled;
           fieldRetries += fillResult.retries;
           if (await options.shouldAbort?.()) {
@@ -501,7 +583,7 @@ export class IS24Contactor {
               fields_typed: fieldCount, field_retries: fieldRetries,
             };
           }
-          await this._clickAbschicken();
+          await this._cdpStep(`retry#${submitRetries}/submit`, () => this._clickAbschicken());
         } else {
           break;
         }
@@ -544,6 +626,16 @@ export class IS24Contactor {
       };
     } catch (err) {
       formState = 'error';
+
+      // The transport or the renderer broke — this says nothing about the
+      // listing.  Rethrow so the daemon re-queues it and reconnects; swallowing
+      // it into a reason string would mark the listing terminally failed and
+      // leave the broken contactor in place for every listing after it.
+      if (isCdpFatalError(err)) {
+        cdpFatal = true;
+        throw err;
+      }
+
       const ssDir = DEBUG.screenshotDir();
       try { await this.page?.screenshot({ path: join(ssDir, `${exposeId}_error.png`), fullPage: true }); } catch (err) { swallow(err, 'screenshot/error'); }
       return {
@@ -552,11 +644,14 @@ export class IS24Contactor {
         fields_typed: fieldCount, field_retries: fieldRetries,
       };
     } finally {
+      this._currentStep = null;
       // Keep the persistent page alive — blank it for the next apply.
       // Closing it would force a newPage() which activates Chromium.
-      // EXCEPTION: perimeter captcha — the captcha page must stay visible
+      // EXCEPTION 1: perimeter captcha — the captcha page must stay visible
       // for the user to solve it.  Navigating away defeats the purpose.
-      if (!perimeterCaptcha) {
+      // EXCEPTION 2: CDP is already broken — cleanup would just burn another
+      // protocol timeout before the daemon gets to reconnect.
+      if (!perimeterCaptcha && !cdpFatal) {
         try {
           if (this.page && !this.page.isClosed() && this.browser?.isConnected()) {
             await this._navigate('about:blank', { timeout: 5000 }).catch((err) => { swallow(err, 'page/navigate-about-blank'); });
@@ -568,7 +663,7 @@ export class IS24Contactor {
 
   async _isLoggedOutSession() {
     try {
-      return await this.page.evaluate(() => {
+      return await this._cdpStep('is-logged-out-session', () => this.page.evaluate(() => {
         const visible = (el) => {
           if (!el) return false;
           const style = window.getComputedStyle(el);
@@ -585,8 +680,12 @@ export class IS24Contactor {
         return Array.from(document.querySelectorAll('a, button'))
           .filter(visible)
           .some((el) => /^\s*(Anmelden|Jetzt einloggen|Einloggen)\s*$/i.test(el.textContent || ''));
-      });
-    } catch { return false; }
+      }));
+    } catch (err) {
+      if (isCdpFatalError(err)) throw err;
+      swallow(err, 'contactor/is-logged-out-session');
+      return false;
+    }
   }
 
   /**
@@ -626,8 +725,9 @@ export class IS24Contactor {
 
   async _fetchMessengerApiExposeIds(maxPages = 50) {
     try {
-      const result = await this.page.evaluate(async ({ endpoint, maxPages }) => {
+      const result = await this._cdpStep('messenger-scrape', () => this.page.evaluate(async ({ endpoint, maxPages, budgetMs }) => {
         const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const giveUpAt = Date.now() + budgetMs;
         const ids = [];
         let pagesScanned = 0;
         let timestampOfLastConversationPaginated = null;
@@ -652,6 +752,11 @@ export class IS24Contactor {
         };
 
         for (let page = 0; page < maxPages; page++) {
+          // This whole function runs inside one Runtime.callFunctionOn with
+          // awaitPromise, so it must finish well inside the protocol timeout.
+          if (Date.now() > giveUpAt) {
+            return { ok: false, reason: `Messenger API scrape exceeded ${budgetMs}ms budget`, exposeIds: ids, pagesScanned, lastStatus, lastUrl };
+          }
           const url = new URL(endpoint, window.location.origin);
           if (timestampOfLastConversationPaginated) {
             url.searchParams.set('timestampOfLastConversationPaginated', timestampOfLastConversationPaginated);
@@ -666,6 +771,9 @@ export class IS24Contactor {
                 credentials: 'include',
                 headers: { accept: 'application/json' },
                 cache: 'no-cache',
+                // A fetch that never settles would hang the enclosing
+                // Runtime.callFunctionOn until the protocol timeout.
+                signal: AbortSignal.timeout(Math.max(1000, giveUpAt - Date.now())),
               });
               text = await resp.text();
               break;
@@ -709,13 +817,17 @@ export class IS24Contactor {
         }
 
         return { ok: true, exposeIds: ids, pagesScanned, lastStatus, lastUrl };
-      }, { endpoint: IS24_MESSENGER_CONVERSATIONS_API, maxPages });
+      }, { endpoint: IS24_MESSENGER_CONVERSATIONS_API, maxPages, budgetMs: MESSENGER_SCRAPE_BUDGET_MS }));
 
       const exposeIds = [...new Set((result.exposeIds || []).map(String).filter((id) => /^\d{5,}$/.test(id)))];
       const reason = result.reason || (result.ok ? null : 'Messenger API failed');
       const failClosed = !result.ok;
       return { ...result, ok: Boolean(result.ok), failClosed, reason, exposeIds, source: 'api' };
     } catch (err) {
+      // A broken renderer is not a Messenger failure — let it reach the daemon,
+      // which drops the contactor and reconnects instead of failing closed in a
+      // tight loop forever.
+      if (isCdpFatalError(err)) throw err;
       return { ok: false, failClosed: true, reason: `Messenger API fetch failed: ${err.message}`, exposeIds: [], pagesScanned: 0, source: 'api' };
     }
   }
@@ -784,16 +896,22 @@ export class IS24Contactor {
 
   async _isBlocked() {
     try {
-      const title = await this.page.title();
-      if (/Roboter|Sicherheitsprüfung|Sicherheitsabfrage/i.test(title)) return true;
-      const bodyText = await this.page.evaluate(() => document.body ? document.body.innerText : '');
-      return /(Ich bin kein Roboter|Sicherheitsabfrage|Zeichen aus dem Bild eingeben|Sicherheitsprüfung bestanden)/i.test(bodyText);
-    } catch { return false; }
+      return await this._cdpStep('is-blocked', async () => {
+        const title = await this.page.title();
+        if (/Roboter|Sicherheitsprüfung|Sicherheitsabfrage/i.test(title)) return true;
+        const bodyText = await this.page.evaluate(() => document.body ? document.body.innerText : '');
+        return /(Ich bin kein Roboter|Sicherheitsabfrage|Zeichen aus dem Bild eingeben|Sicherheitsprüfung bestanden)/i.test(bodyText);
+      });
+    } catch (err) {
+      if (isCdpFatalError(err)) throw err;
+      swallow(err, 'contactor/is-blocked');
+      return false;
+    }
   }
 
   async _isPremiumListing() {
     try {
-      return await this.page.evaluate(() => {
+      return await this._cdpStep('is-premium-listing', () => this.page.evaluate(() => {
         const visible = (el) => {
           if (!el) return false;
           const style = window.getComputedStyle(el);
@@ -808,13 +926,17 @@ export class IS24Contactor {
           .map((el) => el.textContent?.trim() || '')
           .filter(Boolean);
         return candidates.some((text) => plusTextRe.test(text) && plusGateRe.test(text));
-      });
-    } catch { return false; }
+      }));
+    } catch (err) {
+      if (isCdpFatalError(err)) throw err;
+      swallow(err, 'contactor/is-premium-listing');
+      return false;
+    }
   }
 
   async _isDeactivated() {
     try {
-      return await this.page.evaluate(() => {
+      return await this._cdpStep('is-deactivated', () => this.page.evaluate(() => {
         const text = document.body?.innerText || '';
         const url = document.location?.href || '';
         // IS24 shows these when listing is gone
@@ -822,8 +944,12 @@ export class IS24Contactor {
         // 404 redirects or page title says "not found"
         if (/Seite nicht gefunden|Page not found|404/i.test(document.title || '')) return true;
         return false;
-      });
-    } catch { return false; }
+      }));
+    } catch (err) {
+      if (isCdpFatalError(err)) throw err;
+      swallow(err, 'contactor/is-deactivated');
+      return false;
+    }
   }
 
   async _waitForForm(timeoutMs) {
@@ -840,7 +966,7 @@ export class IS24Contactor {
   async _openContactFormIfNeeded() {
     try {
       if (await this._isContactFormOpen()) return true;
-      const clicked = await this.page.evaluate(() => {
+      const clicked = await this._cdpStep('click-nachricht', () => this.page.evaluate(() => {
         const visible = (el) => {
           if (!el) return false;
           const style = window.getComputedStyle(el);
@@ -857,10 +983,14 @@ export class IS24Contactor {
         btn.scrollIntoView({ block: 'center', inline: 'center' });
         btn.click();
         return true;
-      });
+      }));
       if (clicked) await jitter(800, 1500);
       return clicked;
-    } catch { return false; }
+    } catch (err) {
+      if (isCdpFatalError(err)) throw err;
+      swallow(err, 'contactor/open-contact-form');
+      return false;
+    }
   }
 
   async _dismissOverlays() {
@@ -1300,7 +1430,7 @@ export class IS24Contactor {
 
   async _isContactFormOpen() {
     try {
-      return await this.page.evaluate(() => {
+      return await this._cdpStep('is-contact-form-open', () => this.page.evaluate(() => {
         const visible = (el) => {
           if (!el) return false;
           const style = window.getComputedStyle(el);
@@ -1324,8 +1454,12 @@ export class IS24Contactor {
         ];
         const hasField = fieldSelectors.some((sel) => visible(document.querySelector(sel)));
         return hasSubmit && hasField;
-      });
-    } catch { return false; }
+      }));
+    } catch (err) {
+      if (isCdpFatalError(err)) throw err;
+      swallow(err, 'contactor/is-contact-form-open');
+      return false;
+    }
   }
 
   async _clickAbschicken() {
@@ -1559,17 +1693,21 @@ export class IS24Contactor {
         if (!loaded) return false;
       }
 
-      const screenshot = await this.page.evaluate(async () => {
+      const screenshot = await this._cdpStep('captcha/read-image', () => this.page.evaluate(async () => {
         const img = document.querySelector('.captcha-image-container img');
         if (!img) return null;
-        const resp = await fetch(img.src);
+        const resp = await fetch(img.src, { signal: AbortSignal.timeout(10_000) });
         const blob = await resp.blob();
         return new Promise((resolve) => {
           const reader = new FileReader();
+          // Without onerror/onabort this promise never settles on a read
+          // failure, which would hang the enclosing CDP command.
           reader.onload = () => resolve(reader.result.split(',')[1]);
+          reader.onerror = () => resolve(null);
+          reader.onabort = () => resolve(null);
           reader.readAsDataURL(blob);
         });
-      });
+      }));
       if (!screenshot) return false;
 
       let solution;
