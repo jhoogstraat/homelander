@@ -10,10 +10,19 @@ import {
   translateUrl,
   getTotalResults,
   fetchListings,
+  isTauschwohnungListing,
   parseSearchUrl,
   validateSearchUrl,
   buildMobileApiUrl,
 } from '../engine/url-translator.js';
+
+describe('isTauschwohnungListing', () => {
+  it('recognizes both German swap-word orders', () => {
+    assert.equal(isTauschwohnungListing({ title: 'Tauschwohnung gesucht' }), true);
+    assert.equal(isTauschwohnungListing({ title: 'Wohnungstausch gesucht' }), true);
+    assert.equal(isTauschwohnungListing({ title: 'Schöne Wohnung' }), false);
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Helpers

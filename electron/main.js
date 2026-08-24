@@ -1041,7 +1041,7 @@ function registerIpcHandlers() {
         return { ok: true, pending: true, ...latestNachrichtenSync };
       }
 
-      const { fetchListings } = await import('../engine/url-translator.js');
+      const { fetchListings, isTauschwohnungListing } = await import('../engine/url-translator.js');
       const MAX_PAGES = 5, PAGE_SIZE = 20;
       let allInserted = 0, allFetched = 0, duplicateProtected = 0, tauschExcluded = 0, firstPollCapped = false;
       for (let page = 1; page <= MAX_PAGES; page++) {
@@ -1049,7 +1049,7 @@ function registerIpcHandlers() {
         if (error) break;
         const excludeTausch = config.polling?.exclude_tauschwohnungen ?? true;
         const filteredListings = excludeTausch
-          ? listings.filter((listing) => !String(listing.title || '').toLowerCase().includes('tauschwohnung'))
+          ? listings.filter((listing) => !isTauschwohnungListing(listing))
           : listings;
         if (excludeTausch) {
           tauschExcluded += Math.max(0, listings.length - filteredListings.length);

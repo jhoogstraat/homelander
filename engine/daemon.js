@@ -94,7 +94,7 @@ if (process.platform === 'win32') {
 const { HomelanderDB } = await import('./db.js');
 const { IS24Contactor, DEBUG } = await import('./is24-contactor.js');
 const { isCdpFatalError } = await import('./cdp-limits.js');
-const { fetchListings } = await import('./url-translator.js');
+const { fetchListings, isTauschwohnungListing } = await import('./url-translator.js');
 
 // ── Helpers ────────────────────────────────────────────────────
 
@@ -768,7 +768,7 @@ async function pollLoop(db) {
             break;
           }
           const filteredListings = (currentConfig.polling?.exclude_tauschwohnungen ?? true)
-            ? listings.filter((listing) => !String(listing.title || '').toLowerCase().includes('tauschwohnung'))
+            ? listings.filter((listing) => !isTauschwohnungListing(listing))
             : listings;
           const dedupedListings = filteredListings.filter(
             (l) => !db.isManuallyApplied(l.expose_id)
@@ -842,7 +842,7 @@ function setupIpc(db) {
           }
           const excludeTausch = currentConfig.polling?.exclude_tauschwohnungen ?? true;
           const filteredListings = excludeTausch
-            ? listings.filter((listing) => !String(listing.title || '').toLowerCase().includes('tauschwohnung'))
+            ? listings.filter((listing) => !isTauschwohnungListing(listing))
             : listings;
           if (excludeTausch) {
             tauschExcluded += Math.max(0, listings.length - filteredListings.length);

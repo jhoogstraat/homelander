@@ -1037,6 +1037,12 @@ export async function getTotalResults(webUrl, options = {}) {
   }
 }
 
+/** Identify common IS24 title spellings for swap apartments. */
+export function isTauschwohnungListing(listing) {
+  const title = String(listing?.title || '').toLowerCase();
+  return title.includes('tauschwohnung') || title.includes('wohnungstausch');
+}
+
 /** Fetch listings from the mobile API. */
 export async function fetchListings(webUrl, page = 1) {
   const validation = validateSearchUrl(webUrl);
